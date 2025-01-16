@@ -26,6 +26,7 @@
 
 import BrPred::*;
 import DirPredictor::*;
+import StagedBrPred::*;
 import Btb::*;
 import ClientServer::*;
 import Connectable::*;
@@ -143,6 +144,12 @@ typedef struct {
     Bool decode_epoch;
     Epoch main_epoch;
 } Fetch2ToDecode deriving(Bits, Eq, FShow);
+
+typedef struct {
+    StagedDirPredResult#(DirPredTrainInfo) result;
+    Epoch main_epoch;
+    Bool decode_epoch;
+} Pred2Decode deriving(Bits, Eq, FShow);
 
 // Used purely internally in doDecode.
 typedef struct {
@@ -288,15 +295,29 @@ module mkFetchStage(FetchStage);
     // Pipeline Stage FIFOs
     Fifo#(1, Addr) translateAddress <- mkCFFifo;
     Fifo#(2, Fetch1ToFetch2) fetch1toFetch2 <- mkCFFifo; // FIFO should match I$ latency
+    // Can the fifo size be smaller?
     // These two fifos needs a capacity of 3 for full throughput if we fire only when we can enq on all channels.
     SupFifo#(SupSizeX2, 3, Fetch2ToDecode) f2d <- mkUGSupFifo; // Unguarded to prevent the static analyser from exploding.
     SupFifo#(SupSize, 3, FromFetchStage) out_fifo <- mkSupFifo;
-       // Can the fifo size be smaller?
+
+
+    
+    `ifdef STAGED_PREDICTOR
+    // May not need to be superscalar
+    SupFifo#(SupSize, 3, Pred2Decode) pred2Decode <- mkUGSupFifo; 
+
+    `endif
 
     // Branch Predictors
     let             nextAddrPred <- mkBtb;
-    let             dirPred      <- mkDirPredictor;
     ReturnAddrStack ras          <- mkRas;
+
+    `ifdef STAGED_PREDICTOR
+    let             stagedDirPred <- mkDirPredictor;
+    `else
+    let             dirPred      <- mkDirPredictor;
+    `endif
+    
     // Wire to train next addr pred (NAP)
     RWire#(TrainNAP) napTrainByExe <- mkRWire;
     RWire#(TrainNAP) napTrainByDec <- mkRWire;
@@ -378,6 +399,9 @@ module mkFetchStage(FetchStage);
     rule doFetch1(started && !waitForRedirect[0] && !waitForFlush[0]);
         let pc = pc_reg[pc_fetch1_port];
 
+        `ifdef STAGED_PREDICTOR
+        stagedDirPred.nextPc(pc);
+        `endif
         // Grab a chain of predictions from the BTB, which predicts targets for the next
         // set of addresses based on the current PC.
         Vector#(SupSizeX2, Maybe#(Addr)) pred_future_pc = nextAddrPred.pred;
@@ -486,6 +510,18 @@ module mkFetchStage(FetchStage);
            end
         end
 
+        `ifdef STAGED_PREDICTOR
+        
+        let predResults <- stagedDirPred.pred;
+        for(Integer i = 0; i < valueOf(SupSize); i = i + 1)
+            pred2Decode.enqS[i].enq(
+                Pred2Decode{
+                    result: predResults[i],
+                    decode_epoch: fetch2In.decode_epoch,
+                    main_epoch: fetch2In.main_epoch
+                });
+        `endif
+
         for (Integer i = 0; i < valueOf(SupSizeX2) && fromInteger(i) <= fetch2In.inst_frags_fetched; i = i + 1) begin
            PcCompressed pc = fetch2In.pc;
            pc.lsb = pc.lsb + (2 * fromInteger(i));
@@ -500,7 +536,9 @@ module mkFetchStage(FetchStage);
         end
     endrule: doFetch2
 
+    // Change this
    function Bool isCurrent(Fetch2ToDecode in) = (in.main_epoch == f_main_epoch && in.decode_epoch == decode_epoch[0]);
+   function Bool isCurrentPred(Pred2Decode in) = (in.main_epoch == f_main_epoch && in.decode_epoch == decode_epoch[0]);
 
    rule doDecodeFlush(f2d.deqS[0].canDeq && !isCurrent(f2d.deqS[0].first));
       for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1)
@@ -508,14 +546,35 @@ module mkFetchStage(FetchStage);
             pcBlocks.rPort[i].remove(f2d.deqS[i].first.pc.idx);
             f2d.deqS[i].deq;
          end
+      `ifdef STAGED_PREDICTOR
+      for (Integer i = 0; i < valueOf(SupSize); i = i + 1)
+        if (pred2Decode.deqS[i].canDeq &&& !isCurrentPred(pred2Decode.deqS[i].first)) begin
+            pred2Decode.deqS[i].deq;
+        end
+      `endif
    endrule: doDecodeFlush
 
+   `ifdef STAGED_PREDICTOR
+   rule doDecode(pred2Decode.deqS[0].canDeq && f2d.deqS[0].canDeq && isCurrent(f2d.deqS[0].first));
+   `else
    rule doDecode(f2d.deqS[0].canDeq && isCurrent(f2d.deqS[0].first));
+   `endif
       Vector#(SupSize, Maybe#(InstrFromFetch2)) decodeIn = replicate(Invalid);
       // Express the incoming fragments as a vector of maybes.
       Vector#(SupSizeX2, Maybe#(Fetch2ToDecode)) frags;
       for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1)
-         frags[i] = (f2d.deqS[i].canDeq) ? Valid (f2d.deqS[i].first) : Invalid;
+        frags[i] = (f2d.deqS[i].canDeq) ? Valid (f2d.deqS[i].first) : Invalid;
+
+      `ifdef STAGED_PREDICTOR
+      Vector#(SupSize, Maybe#(StagedDirPredResult#(DirPredTrainInfo))) predResults = replicate(Invalid);
+      for (Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
+        if(pred2Decode.deqS[i].canDeq) begin
+            predResults[i] = tagged Valid pred2Decode.deqS[i].first.result;
+            pred2Decode.deqS[i].deq;
+        end
+       end
+      `endif
+
       // Pick as up to SupSize instructions from the f2d SupFifo.
       // Stop picking when we have SupSize instructions or when we have exhausted the ports on the instruction fragment FIFO.
       Maybe#(Bit#(TLog#(SupSizeX2))) m_used_frag_count = Invalid;
@@ -560,6 +619,11 @@ module mkFetchStage(FetchStage);
       Maybe#(IType) redirectInst = Invalid;
 `endif
       Bool likely_epoch_change = False;
+      
+      `ifdef STAGED_PREDICTOR
+      SupCnt branchCount = 0;
+      Bit#(SupSize) branchRes = 0;
+      `endif
       for (Integer i = 0; i < valueof(SupSize); i=i+1) begin
          Addr pc = decompressPc(validValue(decodeIn[i]).pc);
          Addr ppc = decompressPc(validValue(decodeIn[i]).ppc);
@@ -583,12 +647,26 @@ module mkFetchStage(FetchStage);
                redirectPc = Valid (pc); // record redirect to the first PC in this bundle.
                trainNAP = Valid (TrainNAP {pc: pc, nextPc: pc + 2});
             end else if (in.decode_epoch == decode_epoch_local) begin   
-               DirPredResult#(DirPredTrainInfo) dir_pred = DirPredResult{taken: False, train: ?};
-               if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
-                dir_pred <- dirPred.pred[i].pred;
-                likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
-               end
-               Maybe#(Addr) dir_ppc = decodeBrPred(pc, decode_result.dInst, dir_pred.taken, (validValue(decodeIn[i]).inst_kind == Inst_32b));
+               
+             `ifdef STAGED_PREDICTOR
+                StagedDirPredResult#(DirPredTrainInfo) dir_pred = StagedDirPredResult{taken: False, train: ?};
+                if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
+                    branchRes[branchCount] = 1;
+                    branchCount = branchCount + 1;
+
+                    if(predResults[i] matches tagged Valid .res) begin
+                        likely_epoch_change = (res.taken != validValue(decodeIn[i]).pred_jump);
+                        dir_pred = res;
+                    end
+                end
+             `else
+                DirPredResult#(DirPredTrainInfo) dir_pred = DirPredResult{taken: False, train: ?};
+                if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
+                    dir_pred <- dirPred.pred[i].pred;
+                    likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
+                end
+             `endif
+               Maybe#(Addr) dir_ppc = decodeBrPred(pc, decode_result.dInst, dir_pred.taken, (validValue(decodeIn[i]).inst_kind == Inst_32b)); 
                doAssert(in.main_epoch == f_main_epoch, "main epoch must match");
 
                let decode_result = decode(in.inst);    // Decode 32b inst, or 32b expansion of 16b inst
@@ -700,6 +778,9 @@ module mkFetchStage(FetchStage);
          end // if (decodeIn[i] matches tagged Valid .in)
       end // for (Integer i = 0; i < valueof(SupSize); i=i+1)
 
+      `ifdef STAGED_PREDICTOR
+        stagedDirPred.confirmPred(branchRes, branchCount);
+       `endif
       // update PC and epoch
       if(redirectPc matches tagged Valid .rp) begin
          pc_reg[pc_decode_port] <= rp;
@@ -722,9 +803,11 @@ module mkFetchStage(FetchStage);
 `endif
    endrule
 
+   `ifndef STAGED_PREDICTOR
    rule reportDecodePc;
        dirPred.nextPc(decode_pc_reg[decode_pc_final_port]);
    endrule
+   `endif
 
     // train next addr pred: we use a wire to catch outputs of napTrainByDecQ.
     // This prevents napTrainByDecQ from clogging doDecode rule when
@@ -812,7 +895,11 @@ module mkFetchStage(FetchStage);
         //end
         if (iType == Br) begin
             // Train the direction predictor for all branches
-            dirPred.update(taken, dpTrain, mispred);
+            `ifdef STAGED_PREDICTOR
+                stagedDirPred.update(taken, dpTrain, mispred);
+            `else
+                dirPred.update(taken, dpTrain, mispred);
+            `endif
         end
         // train next addr pred when mispred
         if(mispred) begin
@@ -828,12 +915,22 @@ module mkFetchStage(FetchStage);
 
     method Action flush_predictors;
         nextAddrPred.flush;
+        
+        `ifdef STAGED_PREDICTOR
+        stagedDirPred.flush;
+        `else
         dirPred.flush;
+        `endif
+
         ras.flush;
     endmethod
 
     method Bool flush_predictors_done;
+        `ifdef STAGED_PREDICTOR
+        return nextAddrPred.flush_done && stagedDirPred.flush_done && ras.flush_done;
+        `else
         return nextAddrPred.flush_done && dirPred.flush_done && ras.flush_done;
+        `endif
     endmethod
 
     method FetchDebugState getFetchState;

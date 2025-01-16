@@ -1,0 +1,235 @@
+
+// Copyright (c) 2017 Massachusetts Institute of Technology
+// 
+// Permission is hereby granted, free of charge, to any person
+// obtaining a copy of this software and associated documentation
+// files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy,
+// modify, merge, publish, distribute, sublicense, and/or sell copies
+// of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+// 
+// The above copyright notice and this permission notice shall be
+// included in all copies or substantial portions of the Software.
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+// BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+import Types::*;
+import ProcTypes::*;
+import RegFile::*;
+import Ehr::*;
+import Vector::*;
+import GlobalBrHistReg::*;
+import BrPred::*;
+import StagedBrPred::*;
+import Cur_Cycle :: *;
+import Fifos::*;
+
+export TourLocalHistSz;
+export TourLocalHist;
+export TourGlobalHistSz;
+export TourGlobalHist;
+export StagedTourTrainInfo(..);
+export TourGHistReg(..);
+export mkStagedTourPred;
+export mkStagedTourGHistReg;
+export PCIndexSz;
+export PCIndex;
+
+// 4KB tournament predictor
+
+typedef 12 TourGlobalHistSz;
+typedef 10 TourLocalHistSz;
+typedef 10 PCIndexSz;
+
+typedef Bit#(TourGlobalHistSz) TourGlobalHist;
+typedef Bit#(TourLocalHistSz) TourLocalHist;
+typedef Bit#(PCIndexSz) PCIndex;
+
+typedef struct {
+    TourGlobalHist globalHist;
+    TourLocalHist localHist;
+    Bool globalTaken;
+    Bool localTaken;
+    PCIndex pcIndex;
+} StagedTourTrainInfo deriving(Bits, Eq, FShow);
+
+// global history reg
+typedef GlobalBrHistReg#(TourGlobalHistSz) TourGHistReg;
+
+(* synthesize *)
+module mkStagedTourGHistReg(TourGHistReg);
+    let m <- mkGlobalBrHistReg;
+    return m;
+endmodule
+
+(* synthesize *)
+module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
+    // local history: MSB is the latest branch
+    RegFile#(PCIndex, TourLocalHist) localHistTab <- mkRegFileWCF(0, maxBound);
+    // local sat counters
+    RegFile#(TourLocalHist, Bit#(3)) localBht <- mkRegFileWCF(0, maxBound);
+    // global history reg
+    TourGHistReg gHistReg <- mkStagedTourGHistReg;
+    // global sat counters
+    RegFile#(TourGlobalHist, Bit#(2)) globalBht <- mkRegFileWCF(0, maxBound);
+    // choice sat counters: large (taken) -- use local, small (not taken) -- use global
+    RegFile#(TourGlobalHist, Bit#(2)) choiceBht <- mkRegFileWCF(0, maxBound);
+    
+
+    // Lookup PC
+    Ehr#(2, Addr) pc_reg <- mkEhr(0);
+
+    // EHR to record predict results in this cycle
+    Ehr#(2, SupCnt) predCnt <- mkEhr(0);
+    Ehr#(2, Bit#(SupSize)) predRes <- mkEhr(0);
+
+    Fifo#(2, Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo))) pred1ToPred2 <- mkCFFifo;
+    PulseWire enable <- mkPulseWire;
+    Ehr#(2, Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo))) pred2Results <- mkEhr(replicate(StagedDirPredResult{taken: ?, train: ?}));
+
+
+
+    Reg#(UInt#(64)) predCount <- mkReg(0);
+    Reg#(UInt#(64)) misPredCount <- mkReg(0);
+
+
+    function PCIndex getPCIndex(Addr pc);
+        return truncate(pc >> 2);
+    endfunction
+
+    // common sat counter operations
+    function Bool isTaken(Bit#(n) cnt) provisos(Add#(1, a__, n));
+        Bit#(1) msb = truncateLSB(cnt);
+        return msb == 1;
+    endfunction
+
+    function Bit#(n) updateCnt(Bit#(n) cnt, Bool taken);
+        if(taken) begin
+            return cnt == maxBound ? maxBound : cnt + 1;
+        end
+        else begin
+            return cnt == 0 ? 0 : cnt - 1;
+        end
+    endfunction
+
+    
+    TourGlobalHist curGHist = gHistReg.history; // global history: MSB is the latest branch
+    Reg#(Vector#(SupSize, Bool)) globalTakenVec <- mkRegU;
+    Reg#(Vector#(SupSize, Bool)) useLocalVec <- mkRegU;
+    
+
+
+    rule pred1(enable);
+        Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo)) ret;
+        for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
+            PCIndex pcIndex = getPCIndex(offsetPc(pc_reg[1], i));
+            // get local history & prediction
+            TourLocalHist localHist = localHistTab.sub(pcIndex);
+            Bool localTaken = isTaken(localBht.sub(localHist));
+
+            // get the global history
+            // all previous branch in this cycle must be not taken
+            // otherwise this branch should be on wrong path
+            // because all inst in same cycle are fetched consecutively
+            // get global prediction
+            Bool globalTaken = globalTakenVec[0];
+
+            // make choice
+            Bool useLocal = useLocalVec[0];
+            Bool taken = useLocal ? localTaken : globalTaken;
+
+            
+            // return
+            ret[i] = StagedDirPredResult {
+                taken: taken,
+                train: StagedTourTrainInfo {
+                    globalHist: curGHist,
+                    localHist: localHist,
+                    globalTaken: globalTaken,
+                    localTaken: localTaken,
+                    pcIndex: pcIndex
+                }
+            };
+        end
+        pred1ToPred2.enq(ret);
+    endrule
+
+    (* fire_when_enabled *)
+    rule pred2(pred1ToPred2.notEmpty);
+        let f = pred1ToPred2.first;
+        pred2Results[0] <= f;
+    endrule
+
+    (* fire_when_enabled, no_implicit_conditions *)
+    rule canonGlobalHist;
+        gHistReg.addHistory(predRes[1], predCnt[1]);
+        // Buffer useLocalVec
+        // Reproduce next history; this would ideally be done in GlobalBrHistReg to avoid duplicating logic.
+        TourGlobalHist nHist = truncate({predRes[1], curGHist} >> predCnt[1]);
+        function Bool globalTakenLookup (Integer i) = isTaken(globalBht.sub(nHist >> i));
+        function Bool useLocalLookup (Integer i) = isTaken(choiceBht.sub(nHist >> i));
+        globalTakenVec <= genWith(globalTakenLookup);
+        useLocalVec <= genWith(useLocalLookup);
+        // Reset counters and prediction.
+        predRes[1] <= 0;
+        predCnt[1] <= 0;
+    endrule
+    
+
+
+    method ActionValue#(Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo))) pred;
+        pred1ToPred2.deq;
+        return pred2Results[1];
+    endmethod
+
+
+
+    method Action confirmPred(Bit#(SupSize) results, SupCnt count);
+        predRes[0] <= results;
+        predCnt[0] <= count;
+    endmethod
+
+    method Action nextPc(Addr pc); 
+        pc_reg[0] <= pc;
+        enable.send;
+    endmethod
+
+
+    method Action update(Bool taken, StagedTourTrainInfo train, Bool mispred);
+        // update history if mispred
+        if(mispred) begin
+            TourGlobalHist newHist = truncateLSB({pack(taken), train.globalHist});
+            gHistReg.redirect(newHist);
+        end
+
+        predCount <= predCount+1;
+        if(mispred)
+            misPredCount <= misPredCount + 1;
+        $display("Cycle %0d, TOURPRED, predCount = %d, mispred Count = %d\n", cur_cycle, predCount, misPredCount);
+        // update local history (assume only 1 branch for an PC in flight)
+        localHistTab.upd(train.pcIndex, truncateLSB({pack(taken), train.localHist}));
+        // update local sat cnt
+        let localCnt = localBht.sub(train.localHist);
+        localBht.upd(train.localHist, updateCnt(localCnt, taken));
+        // update global sat cnt
+        let globalCnt = globalBht.sub(train.globalHist);
+        globalBht.upd(train.globalHist, updateCnt(globalCnt, taken));
+        // update choice cnt
+        if(train.globalTaken != train.localTaken) begin
+            Bool useLocal = train.localTaken == taken;
+            let choiceCnt = choiceBht.sub(train.globalHist);
+            choiceBht.upd(train.globalHist, updateCnt(choiceCnt, useLocal));
+        end
+    endmethod
+
+    method flush = noAction;
+    method flush_done = True;
+endmodule
