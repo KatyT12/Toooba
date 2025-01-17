@@ -31,6 +31,7 @@ import BrPred::*;
 import StagedBrPred::*;
 import Cur_Cycle :: *;
 import Fifos::*;
+import EpochManager::*;
 
 export TourLocalHistSz;
 export TourLocalHist;
@@ -85,15 +86,15 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
     
 
     // Lookup PC
-    Ehr#(2, Addr) pc_reg <- mkEhr(0);
+    Ehr#(2, Tuple3#(Addr, Epoch, Bool)) pc_reg <- mkEhr(?);
 
     // EHR to record predict results in this cycle
     Ehr#(2, SupCnt) predCnt <- mkEhr(0);
     Ehr#(2, Bit#(SupSize)) predRes <- mkEhr(0);
 
-    Fifo#(2, Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo))) pred1ToPred2 <- mkCFFifo;
+    Fifo#(2, Vector#(SupSize, GuardedResult#(StagedTourTrainInfo))) pred1ToPred2 <- mkCFFifo;
     PulseWire enable <- mkPulseWire;
-    Ehr#(2, Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo))) pred2Results <- mkEhr(replicate(StagedDirPredResult{taken: ?, train: ?}));
+    Ehr#(2, Vector#(SupSize, GuardedResult#(StagedTourTrainInfo))) pred2Results <- mkEhr(replicate(GuardedResult{result: ?, main_epoch: ?, decode_epoch: ?}));
 
 
 
@@ -128,9 +129,11 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
 
 
     rule pred1(enable);
-        Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo)) ret;
+        Vector#(SupSize, GuardedResult#(StagedTourTrainInfo)) ret;
+        match {.pc, .main_epoch, .decode_epoch} = pc_reg[1];
+        $display("Prediction on %x\n", pc);
         for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
-            PCIndex pcIndex = getPCIndex(offsetPc(pc_reg[1], i));
+            PCIndex pcIndex = getPCIndex(pc + fromInteger(i) * 2);
             // get local history & prediction
             TourLocalHist localHist = localHistTab.sub(pcIndex);
             Bool localTaken = isTaken(localBht.sub(localHist));
@@ -148,14 +151,18 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
 
             
             // return
-            ret[i] = StagedDirPredResult {
-                taken: taken,
-                train: StagedTourTrainInfo {
-                    globalHist: curGHist,
-                    localHist: localHist,
-                    globalTaken: globalTaken,
-                    localTaken: localTaken,
-                    pcIndex: pcIndex
+            ret[i] = GuardedResult {
+                decode_epoch: decode_epoch,
+                main_epoch: main_epoch,
+                result: StagedDirPredResult {
+                    taken: taken,
+                    train: StagedTourTrainInfo {
+                        globalHist: curGHist,
+                        localHist: localHist,
+                        globalTaken: globalTaken,
+                        localTaken: localTaken,
+                        pcIndex: pcIndex
+                        }
                 }
             };
         end
@@ -163,9 +170,11 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
     endrule
 
     (* fire_when_enabled *)
-    rule pred2(pred1ToPred2.notEmpty);
-        let f = pred1ToPred2.first;
-        pred2Results[0] <= f;
+    rule pred2;
+        if(pred1ToPred2.notEmpty) begin
+            let f = pred1ToPred2.first;
+            pred2Results[0] <= f;
+        end
     endrule
 
     (* fire_when_enabled, no_implicit_conditions *)
@@ -185,8 +194,10 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
     
 
 
-    method ActionValue#(Vector#(SupSize, StagedDirPredResult#(StagedTourTrainInfo))) pred;
+    method ActionValue#(Vector#(SupSize, GuardedResult#(StagedTourTrainInfo))) pred;
         pred1ToPred2.deq;
+        $display("Pred dequeued\n");
+        $display("Pred called\n");
         return pred2Results[1];
     endmethod
 
@@ -197,8 +208,9 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
         predCnt[0] <= count;
     endmethod
 
-    method Action nextPc(Addr pc); 
-        pc_reg[0] <= pc;
+    method Action nextPc(Addr pc, Epoch main_epoch, Bool decode_epoch) if (pred1ToPred2.notFull); 
+        $display("Pred Next PC %x\n", pc);
+        pc_reg[0] <= tuple3(pc, main_epoch, decode_epoch);
         enable.send;
     endmethod
 
@@ -228,6 +240,10 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
             let choiceCnt = choiceBht.sub(train.globalHist);
             choiceBht.upd(train.globalHist, updateCnt(choiceCnt, useLocal));
         end
+    endmethod
+    
+    method Action flushFront;
+        pred1ToPred2.clear;
     endmethod
 
     method flush = noAction;

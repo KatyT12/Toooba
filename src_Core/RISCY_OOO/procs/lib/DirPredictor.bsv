@@ -37,7 +37,7 @@ import GSharePred::*;
 import TourPredSecure::*;
 import TageTest::*;
 
-//import TourPred::*;
+import TourPred::*;
 import StagedTourPred::*;
 
 export DirPredTrainInfo(..);

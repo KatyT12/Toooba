@@ -242,6 +242,13 @@ function Bool is_32b_inst (Bit #(n) inst);
    return (inst [1:0] == 2'b11);
 endfunction
 
+function ActionValue#(Bit#(1)) dummy(Bit#(1) in);
+actionvalue
+    let c <- cur_cycle;
+    return in ^ pack(c)[0];
+endactionvalue
+endfunction
+
 // Parsing a sequence of 16-bit parcels returns a sequence of the
 // following kinds or items
 
@@ -300,11 +307,15 @@ module mkFetchStage(FetchStage);
     SupFifo#(SupSizeX2, 3, Fetch2ToDecode) f2d <- mkUGSupFifo; // Unguarded to prevent the static analyser from exploding.
     SupFifo#(SupSize, 3, FromFetchStage) out_fifo <- mkSupFifo;
 
+    Ehr#(2, UInt#(5)) frag_count <- mkEhr(0);
+    Ehr#(2, UInt#(5)) pred_count <- mkEhr(0);
 
     
     `ifdef STAGED_PREDICTOR
     // May not need to be superscalar
-    SupFifo#(SupSize, 3, Pred2Decode) pred2Decode <- mkUGSupFifo; 
+    SupFifo#(SupSizeX2, 5, Pred2Decode) pred2Decode <- mkUGSupFifo; 
+    Reg#(Addr) lastPc <- mkRegU;
+    Reg#(Bool) useLast <- mkReg(False);
 
     `endif
 
@@ -391,17 +402,29 @@ module mkFetchStage(FetchStage);
         if (verbosity >= 2) $display ("%d Fetch Translate: pc: %x, ", cur_cycle, translateAddress.first, fshow (tr));
     endrule
 
+    //(* descending_urgency = "doFetch1, doFetch1Pred" *)
+    (* preempts = "doFetch1, doFetch1Pred" *)
+    (* preempts = "start, doFetch1Pred" *)
+    `ifdef STAGED_PREDICTOR
+    rule doFetch1Pred(started && !waitForRedirect[0] && !waitForFlush[0] && useLast);  
+        let pc = pc_reg[pc_fetch1_port];
+        Addr next = lastPc + fromInteger(2*valueOf(SupSize));
+        useLast <= False;
+        stagedDirPred.nextPc(next, f_main_epoch, decode_epoch[0]);
+    endrule
+    `endif
+
     // doFetch1 pulls a prediction out of the BTB and attempts to translate it
     // from a small buffer (~2) of recent TLB translations.
     // If the necessary translation is not in the buffer, doFetch1 submits a TLB
     // lookup request and then retrys until getTlbResp has populated the buffer
     // and the lookup succeeds.
+    
     rule doFetch1(started && !waitForRedirect[0] && !waitForFlush[0]);
         let pc = pc_reg[pc_fetch1_port];
+        lastPc <= pc;
 
-        `ifdef STAGED_PREDICTOR
-        stagedDirPred.nextPc(pc);
-        `endif
+        $display("FETCH1 %x, %d", pc, cur_cycle);
         // Grab a chain of predictions from the BTB, which predicts targets for the next
         // set of addresses based on the current PC.
         Vector#(SupSizeX2, Maybe#(Addr)) pred_future_pc = nextAddrPred.pred;
@@ -460,6 +483,11 @@ module mkFetchStage(FetchStage);
                 main_epoch: f_main_epoch };
             fetch1toFetch2.enq(out);
 
+            `ifdef STAGED_PREDICTOR
+                stagedDirPred.nextPc(pc, f_main_epoch, decode_epoch[0]);
+                useLast <= True;
+            `endif
+
             if (verbosity >= 2) begin
                 $display ("%d ----------------", cur_cycle);
                 $display ("%d Fetch1: translated pyhs_pc 0x%0h  cause ", cur_cycle, phys_pc, fshow (cause));
@@ -475,11 +503,32 @@ module mkFetchStage(FetchStage);
         end
     endrule
 
+    `ifdef STAGED_PREDICTOR
+    rule fetch2Pred;
+        pred_count[0] <= pred_count[0] + 2;
+        let predResults <- stagedDirPred.pred;
+        $display("fetchToPred PRED COUNT with%d, with epochs %d %d\n", pred_count[0], predResults[0].decode_epoch, predResults[0].main_epoch);
+
+        for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
+            $display("Enqueue pred2Decode, %d\n", cur_cycle);
+            pred2Decode.enqS[i].enq(
+                Pred2Decode{
+                    result: predResults[i].result,
+                    decode_epoch: predResults[i].decode_epoch,
+                    main_epoch: predResults[i].main_epoch
+                });
+        end
+    endrule
+
+    `endif
     // Break out of i$
     Vector#(SupSizeX2,Integer) indexes = genVector;
     function Bool f2d_lane_notFull(Integer i) = f2d.enqS[i].canEnq;
     rule doFetch2(all(f2d_lane_notFull, indexes));
         let fetch2In = fetch1toFetch2.first;
+        frag_count[0] <= frag_count[0] + unpack({0,fetch2In.inst_frags_fetched})+1;
+        $display("FETCH2 FRAG COUNT %d with epochs %d %d \n", frag_count[0], fetch2In.decode_epoch, fetch2In.main_epoch);
+        $display("FETCH2 %d ADD %d\n",  cur_cycle, fetch2In.inst_frags_fetched);
         if (verbosity >= 2) begin
             if (fetch1toFetch2.notEmpty)
                 $display("%d Fetch2: fetch2In: ", cur_cycle, fshow (fetch2In));
@@ -510,18 +559,6 @@ module mkFetchStage(FetchStage);
            end
         end
 
-        `ifdef STAGED_PREDICTOR
-        
-        let predResults <- stagedDirPred.pred;
-        for(Integer i = 0; i < valueOf(SupSize); i = i + 1)
-            pred2Decode.enqS[i].enq(
-                Pred2Decode{
-                    result: predResults[i],
-                    decode_epoch: fetch2In.decode_epoch,
-                    main_epoch: fetch2In.main_epoch
-                });
-        `endif
-
         for (Integer i = 0; i < valueOf(SupSizeX2) && fromInteger(i) <= fetch2In.inst_frags_fetched; i = i + 1) begin
            PcCompressed pc = fetch2In.pc;
            pc.lsb = pc.lsb + (2 * fromInteger(i));
@@ -543,22 +580,29 @@ module mkFetchStage(FetchStage);
    rule doDecodeFlush(f2d.deqS[0].canDeq && !isCurrent(f2d.deqS[0].first));
       for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1)
          if (f2d.deqS[i].canDeq &&& !isCurrent(f2d.deqS[i].first)) begin
+            $display("Flush fragments %d, Cycle %d\n",i, cur_cycle);
             pcBlocks.rPort[i].remove(f2d.deqS[i].first.pc.idx);
             f2d.deqS[i].deq;
          end
-      `ifdef STAGED_PREDICTOR
-      for (Integer i = 0; i < valueOf(SupSize); i = i + 1)
-        if (pred2Decode.deqS[i].canDeq &&& !isCurrentPred(pred2Decode.deqS[i].first)) begin
-            pred2Decode.deqS[i].deq;
-        end
-      `endif
    endrule: doDecodeFlush
 
+   rule doDecodePredFlush(pred2Decode.deqS[0].canDeq && !isCurrentPred(pred2Decode.deqS[0].first));
+      for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1)
+         if (pred2Decode.deqS[i].canDeq &&& !isCurrentPred(pred2Decode.deqS[i].first)) begin
+             $display("Flush pred2Decode %d, Cycle %d\n", i, cur_cycle);
+             pred2Decode.deqS[i].deq;
+         end
+   endrule
+
+   
    `ifdef STAGED_PREDICTOR
-   rule doDecode(pred2Decode.deqS[0].canDeq && f2d.deqS[0].canDeq && isCurrent(f2d.deqS[0].first));
+   rule doDecode(pred2Decode.deqS[0].canDeq && f2d.deqS[0].canDeq && isCurrent(f2d.deqS[0].first) && isCurrentPred(pred2Decode.deqS[0].first));
    `else
    rule doDecode(f2d.deqS[0].canDeq && isCurrent(f2d.deqS[0].first));
    `endif
+      $display("DECODE %d",  cur_cycle);
+      $display("DECODE FRAG COUNT %d\n", frag_count[1]);
+      $display("DECODE PRED COUNT %d\n", pred_count[1]);
       Vector#(SupSize, Maybe#(InstrFromFetch2)) decodeIn = replicate(Invalid);
       // Express the incoming fragments as a vector of maybes.
       Vector#(SupSizeX2, Maybe#(Fetch2ToDecode)) frags;
@@ -570,9 +614,9 @@ module mkFetchStage(FetchStage);
       for (Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
         if(pred2Decode.deqS[i].canDeq) begin
             predResults[i] = tagged Valid pred2Decode.deqS[i].first.result;
-            pred2Decode.deqS[i].deq;
         end
        end
+       pred_count[1] <= pred_count[1] - 2;
       `endif
 
       // Pick as up to SupSize instructions from the f2d SupFifo.
@@ -597,7 +641,7 @@ module mkFetchStage(FetchStage);
          end
          decodeIn[pick_count] = new_pick;
          if (isValid(new_pick)) begin
-            if (verbose)
+            if (True)
                $display("Decode: picked instruction %d, next frag %d :", pick_count, i, fshow(decodeIn[pick_count]));
             pick_count = pick_count + 1;
             m_used_frag_count = tagged Valid fromInteger(i);
@@ -606,8 +650,16 @@ module mkFetchStage(FetchStage);
       end
       if (m_used_frag_count matches tagged Valid .used_frag_count) begin
          for (Integer i = 0; i < valueOf(SupSizeX2) && fromInteger(i) <= used_frag_count; i = i + 1) f2d.deqS[i].deq;
-         if (verbose)
-            $display("%d Decode: dequed %d instruction fragments", cur_cycle, used_frag_count);
+         if (True)
+        frag_count[1] <= frag_count[1] - unpack({0,used_frag_count}) - 1;
+
+        // Maybe overcomplicated
+        for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1) begin
+            if(pred2Decode.deqS[i].canDeq && fromInteger(i) <= used_frag_count) begin
+                $display("Decode Dequeue pred2Decode %d\n", i);
+                pred2Decode.deqS[i].deq;
+            end
+        end
       end
 
       Maybe#(Addr) redirectPc = Invalid; // next pc redirect by branch predictor
@@ -646,26 +698,28 @@ module mkFetchStage(FetchStage);
                decode_epoch_local = !decode_epoch_local;
                redirectPc = Valid (pc); // record redirect to the first PC in this bundle.
                trainNAP = Valid (TrainNAP {pc: pc, nextPc: pc + 2});
-            end else if (in.decode_epoch == decode_epoch_local) begin   
-               
-             `ifdef STAGED_PREDICTOR
+            end else if (in.decode_epoch == decode_epoch_local) begin
+                `ifdef STAGED_PREDICTOR
                 StagedDirPredResult#(DirPredTrainInfo) dir_pred = StagedDirPredResult{taken: False, train: ?};
                 if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
                     branchRes[branchCount] = 1;
                     branchCount = branchCount + 1;
 
+                    Bit#(1) took <- dummy(1);
+                    dir_pred.taken = unpack(took);
                     if(predResults[i] matches tagged Valid .res) begin
                         likely_epoch_change = (res.taken != validValue(decodeIn[i]).pred_jump);
                         dir_pred = res;
                     end
                 end
-             `else
-                DirPredResult#(DirPredTrainInfo) dir_pred = DirPredResult{taken: False, train: ?};
-                if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
-                    dir_pred <- dirPred.pred[i].pred;
-                    likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
-                end
-             `endif
+                `else
+                    DirPredResult#(DirPredTrainInfo) dir_pred = DirPredResult{taken: False, train: ?};
+                    if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
+                        Bit#(1) took <- dummy(1);
+                        dir_pred.taken = unpack(took);
+                        likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
+                    end
+                `endif
                Maybe#(Addr) dir_ppc = decodeBrPred(pc, decode_result.dInst, dir_pred.taken, (validValue(decodeIn[i]).inst_kind == Inst_32b)); 
                doAssert(in.main_epoch == f_main_epoch, "main epoch must match");
 
@@ -784,6 +838,8 @@ module mkFetchStage(FetchStage);
       // update PC and epoch
       if(redirectPc matches tagged Valid .rp) begin
          pc_reg[pc_decode_port] <= rp;
+         useLast <= False;
+         stagedDirPred.flushFront;
       end
       decode_epoch[0] <= decode_epoch_local;
       // send training data for next addr pred
@@ -859,9 +915,11 @@ module mkFetchStage(FetchStage);
         f_main_epoch <= (f_main_epoch == fromInteger(valueOf(NumEpochs)-1)) ? 0 : f_main_epoch + 1;
         // redirect comes, stop stalling for redirect
         waitForRedirect[1] <= False;
+        stagedDirPred.flushFront;
         // this redirect may be caused by a trap/system inst in commit stage
         // we conservatively set wait for flush TODO make this an input parameter
         waitForFlush[2] <= True;
+        useLast <= False;
 `ifdef PERFORMANCE_MONITORING
         redirect_evt_reg <= True;
 `endif
