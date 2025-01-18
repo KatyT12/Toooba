@@ -133,7 +133,7 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
         match {.pc, .main_epoch, .decode_epoch} = pc_reg[1];
         $display("Prediction on %x\n", pc);
         for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
-            PCIndex pcIndex = getPCIndex(pc + fromInteger(i) * 2);
+            PCIndex pcIndex = getPCIndex(pc + (fromInteger(i) * 2));
             // get local history & prediction
             TourLocalHist localHist = localHistTab.sub(pcIndex);
             Bool localTaken = isTaken(localBht.sub(localHist));
@@ -156,6 +156,7 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
                 main_epoch: main_epoch,
                 result: StagedDirPredResult {
                     taken: taken,
+                    pc: pc + fromInteger(i),
                     train: StagedTourTrainInfo {
                         globalHist: curGHist,
                         localHist: localHist,

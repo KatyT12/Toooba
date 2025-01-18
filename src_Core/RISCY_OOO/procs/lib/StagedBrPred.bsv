@@ -8,6 +8,8 @@ import EpochManager::*;
 typedef struct {
     Bool taken;
     trainInfoT train;
+    // For debug
+    Addr pc;
 } StagedDirPredResult#(type trainInfoT) deriving(Bits, Eq, FShow);
 
 typedef struct {
