@@ -103,7 +103,7 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
 
 
     function PCIndex getPCIndex(Addr pc);
-        return truncate(pc >> 2);
+        return truncate(pc >> 1);
     endfunction
 
     // common sat counter operations
@@ -156,7 +156,7 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
                 main_epoch: main_epoch,
                 result: StagedDirPredResult {
                     taken: taken,
-                    pc: pc + fromInteger(i),
+                    pc: pc + (fromInteger(i) * 2),
                     train: StagedTourTrainInfo {
                         globalHist: curGHist,
                         localHist: localHist,
@@ -205,6 +205,8 @@ module mkStagedTourPred(StagedDirPredictor#(StagedTourTrainInfo));
 
 
     method Action confirmPred(Bit#(SupSize) results, SupCnt count);
+        $display("Pred confirm %b %b\n", results, count);
+        $display("Global history %b\n", curGHist);
         predRes[0] <= results;
         predCnt[0] <= count;
     endmethod

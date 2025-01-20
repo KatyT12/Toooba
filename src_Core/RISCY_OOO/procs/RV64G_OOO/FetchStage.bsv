@@ -313,9 +313,10 @@ module mkFetchStage(FetchStage);
     
     `ifdef STAGED_PREDICTOR
     // May not need to be superscalar
-    SupFifo#(SupSizeX2, 8, Pred2Decode) pred2Decode <- mkUGSupFifo; 
+    SupFifo#(SupSizeX2, 3, Pred2Decode) pred2Decode <- mkUGSupFifo; 
     Reg#(Addr) lastPc <- mkRegU;
     Reg#(Bool) useLast <- mkReg(False);
+    Reg#(Bit#(SupSize)) lastCount <- mkReg(0);
 
     `endif
 
@@ -442,7 +443,7 @@ module mkFetchStage(FetchStage);
 
         // Search the last few translations to look for a match.
         Maybe#(UInt#(TLog#(PageBuffSize))) m_buff_match_idx = findElem(Valid(getVpn(pc)), buffered_translation_virt_pc);
-        if (m_buff_match_idx matches tagged Valid .buff_match_idx) begin
+        if (m_buff_match_idx matches tagged Valid .buff_match_idx &&& !useLast) begin
             let next_fetch_pc = fromMaybe(pc + (2 * (zeroExtend(posLastSupX2) + 1)), pred_next_pc);
             let pc_idxs <- pcBlocks.insertAndReserve(truncateLSB(pc), truncateLSB(next_fetch_pc));
             PcIdx pc_idx = pc_idxs.inserted;
@@ -484,10 +485,10 @@ module mkFetchStage(FetchStage);
             fetch1toFetch2.enq(out);
 
             `ifdef STAGED_PREDICTOR
-                if(!useLast) begin
+                if(!useLast && fetch1toFetch2.notFull) begin
+                    lastCount <= posLastSupX2;
                     stagedDirPred.nextPc(pc, f_main_epoch, decode_epoch[0]);
-                    if(posLastSupX2 == fromInteger(valueof(SupSizeX2) - 1))
-                        useLast <= True;
+                    useLast <= True;
                 end
             `endif
 
@@ -508,19 +509,25 @@ module mkFetchStage(FetchStage);
 
     `ifdef STAGED_PREDICTOR
     rule fetch2Pred(pred2Decode.enqS[0].canEnq && pred2Decode.enqS[1].canEnq);
+        let fetch2In = fetch1toFetch2.first;
         pred_count[0] <= pred_count[0] + 2;
         let predResults <- stagedDirPred.pred;
         $display("fetchToPred PRED COUNT with%d, with epochs %d %d\n", pred_count[0], predResults[0].decode_epoch, predResults[0].main_epoch);
 
+        Bit#(SupSize) count = 0;
         for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
-            $display("Enqueue pred2Decode, %d\n", cur_cycle);
-            pred2Decode.enqS[i].enq(
-                Pred2Decode{
-                    result: predResults[i].result,
-                    decode_epoch: predResults[i].decode_epoch,
-                    main_epoch: predResults[i].main_epoch
-                });
+            if(fromInteger(i) <= lastCount) begin
+                count = count + 1;
+                $display("Enqueue pred2Decode, %d %x\n", cur_cycle, predResults[i].result.pc);
+                pred2Decode.enqS[i].enq(
+                    Pred2Decode{
+                        result: predResults[i].result,
+                        decode_epoch: predResults[i].decode_epoch,
+                        main_epoch: predResults[i].main_epoch
+                    });
+            end
         end
+        lastCount <= lastCount - count;
     endrule
 
     `endif
@@ -607,19 +614,25 @@ module mkFetchStage(FetchStage);
       $display("DECODE FRAG COUNT %d\n", frag_count[1]);
       $display("DECODE PRED COUNT %d\n", pred_count[1]);
       Vector#(SupSize, Maybe#(InstrFromFetch2)) decodeIn = replicate(Invalid);
+
+      Vector#(SupSize, Bit#(SupSize)) starts = replicate(0);
+      Bit#(SupSize) total = 0;
+
       // Express the incoming fragments as a vector of maybes.
       Vector#(SupSizeX2, Maybe#(Fetch2ToDecode)) frags;
       for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1)
         frags[i] = (f2d.deqS[i].canDeq) ? Valid (f2d.deqS[i].first) : Invalid;
 
       `ifdef STAGED_PREDICTOR
-      Vector#(SupSize, Maybe#(StagedDirPredResult#(DirPredTrainInfo))) predResults = replicate(Invalid);
-      for (Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
+      Bit#(TAdd#(TLog#(SupSizeX2),1)) predCount = 0;
+      Vector#(SupSizeX2, Maybe#(StagedDirPredResult#(DirPredTrainInfo))) predResults = replicate(Invalid);
+
+      for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1) begin
         if(pred2Decode.deqS[i].canDeq) begin
+            predCount = predCount + 1;
             predResults[i] = tagged Valid pred2Decode.deqS[i].first.result;
         end
        end
-       pred_count[1] <= pred_count[1] - 2;
       `endif
 
       // Pick as up to SupSize instructions from the f2d SupFifo.
@@ -629,7 +642,7 @@ module mkFetchStage(FetchStage);
       Bool prev_frag_available = False;
       for (Integer i = 0; i < valueOf(SupSizeX2) && !isValid(decodeIn[valueOf(SupSize) - 1]); i = i + 1) begin
          Maybe#(InstrFromFetch2) new_pick = Invalid;
-         if (frags[i] matches tagged Valid .frag) begin
+         if (frags[i] matches tagged Valid .frag &&& fromInteger(i) < predCount) begin
             Fetch2ToDecode prev_frag = (i != 0) ? validValue(frags[i-1]) : ?;
             if (prev_frag_available &&& !is_16b_inst(prev_frag.inst_frag)) begin // 2nd half of 32-bit instruction
                new_pick = tagged Valid fetch2s_2_inst(frag, prev_frag);
@@ -643,9 +656,11 @@ module mkFetchStage(FetchStage);
             end
          end
          decodeIn[pick_count] = new_pick;
+         starts[pick_count] = total;
          if (isValid(new_pick)) begin
             if (True)
                $display("Decode: picked instruction %d, next frag %d :", pick_count, i, fshow(decodeIn[pick_count]));
+            total = fromInteger(i)+1;
             pick_count = pick_count + 1;
             m_used_frag_count = tagged Valid fromInteger(i);
             prev_frag_available = False;
@@ -657,23 +672,13 @@ module mkFetchStage(FetchStage);
         frag_count[1] <= frag_count[1] - unpack({0,used_frag_count}) - 1;
 
         // Maybe overcomplicated
-        if(used_frag_count > 1) begin
-            for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1) begin
-                if(pred2Decode.deqS[i].canDeq) begin
-                    $display("Decode Dequeue pred2Decode %d\n", i);
+        for (Integer i = 0; i < valueOf(SupSizeX2); i = i + 1) begin
+            if(pred2Decode.deqS[i].canDeq && fromInteger(i) <= used_frag_count) begin
+                    $display("Decode Dequeue pred2Decode %d\n", i, pred2Decode.deqS[i].first.result.pc);
                     pred2Decode.deqS[i].deq;
-                end
             end
         end
-        else begin
-            for (Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
-                if(pred2Decode.deqS[i].canDeq) begin
-                    $display("Decode Dequeue pred2Decode %d\n", i);
-                    pred2Decode.deqS[i].deq;
-                end
-            end
-        end
-      end
+    end
 
       Maybe#(Addr) redirectPc = Invalid; // next pc redirect by branch predictor
       Maybe#(TrainNAP) trainNAP = Invalid; // training data sent to next addr pred
@@ -689,16 +694,17 @@ module mkFetchStage(FetchStage);
       SupCnt branchCount = 0;
       Bit#(SupSize) branchRes = 0;
       `endif
+
+      $display("PRED COUNT %d", predCount);
       for (Integer i = 0; i < valueof(SupSize); i=i+1) begin
          Addr pc = decompressPc(validValue(decodeIn[i]).pc);
 
-         $display("DECODE PRED RESULT %x %x\n", pc, validValue(predResults[i]).pc);
-         
          Addr ppc = decompressPc(validValue(decodeIn[i]).ppc);
          let decode_result = decode(validValue(decodeIn[i]).inst); // Decode 32b inst, or 32b expansion of 16b inst
          let dInst = decode_result.dInst;
          let regs = decode_result.regs;
          if (decodeIn[i] matches tagged Valid .in)  begin
+            $display("DECODE PRED RESULT %x %x %d\n", pc, validValue(predResults[starts[i]]).pc, starts[i]);
             let cause = in.cause;
             pcBlocks.rPort[i].remove(in.pc.idx);
             if (verbose)
@@ -724,10 +730,10 @@ module mkFetchStage(FetchStage);
                     Bit#(1) took <- dummy(1);
                     $display("PREDICT\n");
                     dir_pred.taken = unpack(took);
-                    if(predResults[i] matches tagged Valid .res) begin
+                    if(predResults[starts[i]] matches tagged Valid .res) begin
                         likely_epoch_change = (res.taken != validValue(decodeIn[i]).pred_jump);
                         dir_pred = res;
-                        $display("PREDICT with %x %x %d\n", pc, res.pc, res.taken);
+                        $display("PREDICT with %x %x %d %d\n", pc, res.pc, res.taken, starts[i]);
                     end
                 end
                 `else
