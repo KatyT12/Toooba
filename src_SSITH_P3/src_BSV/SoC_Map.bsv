@@ -239,7 +239,7 @@ module mkSoC_Map (SoC_Map_IFC);
    // ----------------------------------------------------------------
    // DDR memory 0 uncached
 
-   Fabric_Addr ddr4_0_uncached_addr_base = 'h_8000_0000;
+   Fabric_Addr ddr4_0_uncached_addr_base = 'h_c000_0000;
    Fabric_Addr ddr4_0_uncached_addr_size = 'h_4000_0000;    // 1G
    Fabric_Addr ddr4_0_uncached_addr_lim  = ddr4_0_uncached_addr_base + ddr4_0_uncached_addr_size;
 
