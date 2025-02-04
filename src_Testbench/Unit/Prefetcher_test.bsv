@@ -171,7 +171,7 @@ module mkTargetTableDoubleTest(Empty);
                 doAssert(x == tuple2(Valid('h2123000c), Valid('h800a)), "test fail!");
             endaction
             action
-                t.sendReadWriteReq('h, MISS); 
+                t.sendReadWriteReq('h8000, MISS); 
             endaction
             action let x <- t.readResp(); endaction
             action
@@ -784,7 +784,7 @@ module mkBRAMMarkovPrefetcherTest(Empty);
             endaction
             action
                 let x <- p.getNextPrefetchAddr; 
-                doAssert(x == 'h0000, "test fail!");
+                doAssert(x == 'h80000000, "test fail!");
             endaction
             action
                 let x <- p.getNextPrefetchAddr; 
