@@ -254,7 +254,7 @@ module mkSoC_Top #(Reset dm_power_on_reset)
 		      soc_map.m_accel0_addr_lim);
 `endif
 
-	 if (verbosity != 0) begin
+	 if (verbosity >= 0) begin
 	    $display ("  SoC address map:");
 	    $display ("  Boot ROM:        0x%0h .. 0x%0h",
 		      soc_map.m_boot_rom_addr_base,
