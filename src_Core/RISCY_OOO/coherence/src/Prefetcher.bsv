@@ -60,7 +60,7 @@ module mkAlwaysRequestPrefetcher(Prefetcher);
     method Action reportAccess(Addr addr, HitOrMiss hitMiss);
     endmethod
     method ActionValue#(Addr) getNextPrefetchAddr;
-        return 64'h80000040;
+        return 64'hc0000040;
     endmethod
 endmodule
 
@@ -1205,7 +1205,7 @@ module mkDoNothingPCPrefetcher(PCPrefetcher);
     method Action reportAccess(Addr addr, Bit#(16) pcHash, HitOrMiss hitMiss);
     endmethod
     method ActionValue#(Addr) getNextPrefetchAddr if (False);
-        return 64'h0000000080000080;
+        return 64'h00000000c0000080;
     endmethod
 endmodule
 
@@ -1217,7 +1217,7 @@ module mkPrintPCPrefetcher(PCPrefetcher);
             $display("%t PCPrefetcher report MISS %h", $time, addr);
     endmethod
     method ActionValue#(Addr) getNextPrefetchAddr if (False);
-        return 64'h0000000080000080;
+        return 64'h00000000c0000080;
     endmethod
 endmodule
 
