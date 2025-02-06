@@ -49,7 +49,7 @@
 
 #define  ROM_BASE  0x00001000
 
-#define  DMEM_BASE  0xc0000000
+#define  DMEM_BASE  0x80000000
 #define  DMEM_SIZE  0x10000000
 
 #define  CLINT_BASE 0x02000000
