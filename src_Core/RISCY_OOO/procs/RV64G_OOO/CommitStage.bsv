@@ -558,7 +558,7 @@ module mkCommitStage#(CommitInput inIfc)(CommitStage);
 	   $display ("instret:%0d  PC:0x%0h  instr:0x%08h", rg_serial_num, x.pc, x.orig_inst,
 		     "  iType:", fshow (x.iType), "    [doCommitTrap]");
 	end
-        if (verbose) begin
+        if (verbosity >= 0) begin
 	   $display ("CommitStage.doCommitTrap_flush: deq_data:   ", fshow (x));
 	   $display ("CommitStage.doCommitTrap_flush: commitTrap: ", fshow (commitTrap_val));
 	end
