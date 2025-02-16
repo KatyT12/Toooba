@@ -69,7 +69,7 @@ SoC_Map_Struct {
    main_mem_addr_base:    'h_c000_0000,
    main_mem_addr_size:    'h_1000_0000,
 
-   pc_reset_value:        'h_c000_0076 // ?
+   pc_reset_value:        'h_c000_0000 // ?
    };
 
 // ================================================================
@@ -226,7 +226,7 @@ module mkSoC_Map (SoC_Map_IFC);
    // ----------------------------------------------------------------
    // PC, MTVEC and NMIVEC reset values
 
-   Bit #(64) pc_reset_value     = 'h_c000_0076; // TEMP
+   Bit #(64) pc_reset_value     = 'h_c000_0000; // TEMP
    Bit #(64) mtvec_reset_value  = 'h1000;    // TODO
    Bit #(64) nmivec_reset_value = ?;         // TODO
 
