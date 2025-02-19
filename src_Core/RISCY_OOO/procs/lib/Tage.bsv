@@ -99,6 +99,7 @@ typedef struct{
 
 
     Maybe#(ProviderTrainInfo#(numTables)) provider_info;
+    Maybe#(ProviderTrainInfo#(numTables)) altpred_info;
     Maybe#(Bit#(TLog#(numTables))) alt_table;
     // Redundancy, can easily be checked with taken and provider but not efficient?
 
@@ -280,8 +281,8 @@ module mkTage(Tage#(numTables)) provisos(
     endfunction
 
     // WARNING - REMOVE ACTIONVALUE AFTER DEBUG
-    function Action allocate(TageTrainInfo#(numTables) train, Bool taken);
-        action
+    function ActionValue#(Maybe#(TableIndex#(numTables))) allocate(TageTrainInfo#(numTables) train, Bool taken);
+        actionvalue
         Maybe#(TableIndex#(numTables)) ret = tagged Invalid;
         
         if(train.provider_info matches tagged Valid .inf &&& inf.provider_table == fromInteger(valueOf(numTables)-1)) begin
@@ -344,12 +345,14 @@ module mkTage(Tage#(numTables)) provisos(
                 `endif
 
                 `CASE_ALL_TABLES(taggedTablesVector[ind], (*/ t.allocateEntry(truncate(train.indices[ind]), truncate(train.tags[ind]), taken); /*))
+                ret =  tagged Valid ind;
             end
         end
-    endaction
+        return ret;
+    endactionvalue
     endfunction
 
-    function Action updateWithTrain(Bool taken, TageTrainInfo#(numTables) train, Bool mispred);
+    function Action updateWithTrain(Bool taken, TageTrainInfo#(numTables) train, Bool mispred, Maybe#(TableIndex#(numTables)) ind);
         action
         // Update bimodal table either way
         bimodalTable.updateEntry(train.pc, taken);
@@ -367,6 +370,13 @@ module mkTage(Tage#(numTables)) provisos(
 
             ChosenTaggedTables providerTable = taggedTablesVector[info.provider_table];
             `CASE_ALL_TABLES(providerTable, (*/ t.updateEntry(info.index, entry.tag, taken, u); /*))
+
+            if(train.use_alt &&& train.altpred_info matches tagged Valid .alt_info) begin
+                if(alt_info.provider_table < info.provider_table &&& ind matches tagged Valid .alloc_ind &&& alt_info.provider_table < alloc_ind) begin
+                    ChosenTaggedTables altTable = taggedTablesVector[alt_info.provider_table];
+                    `CASE_ALL_TABLES(altTable, (*/ t.updateEntry(alt_info.index, alt_info.provider_entry.tag, taken, PRESERVE); /*))
+                end
+            end
 
             // ALT_ON_NA
             `ifdef DEBUG_TAGETEST
@@ -458,6 +468,7 @@ module mkTage(Tage#(numTables)) provisos(
             ret.indices = indices;
             ret.tags = tags;
             ret.confirmed = True;
+            ret.altpred_info = tagged Invalid;
 
             
             if(pred matches tagged Valid {.pred_index, .pred_entry, .pred_table_index}) begin 
@@ -479,6 +490,10 @@ module mkTage(Tage#(numTables)) provisos(
                     
                     Bool alt_prediction = takenFromCounter(alt_entry.predictionCounter);                 
                     ret.alt_prediction = alt_prediction;
+
+                    Bit#(`MAX_INDEX_SIZE) alt_table_index = 0;
+                    `CASE_ALL_TABLES(taggedTablesVector[alt_index], (*/alt_table_index = zeroExtend(tpl_2(t.trainingInfo(pc, BEFORE_RECOVERY)));/*))    
+                    ret.altpred_info = tagged Valid ProviderTrainInfo{index: alt_table_index, provider_table: alt_index, provider_entry: alt_entry};
 
                     if(pred_entry.usefulCounter == 0 && weakCounter(pred_entry.predictionCounter) && useAlt) begin
                         ret.taken = alt_prediction;
@@ -619,14 +634,14 @@ module mkTage(Tage#(numTables)) provisos(
                     `ifdef DEBUG_TAGETEST
                     $display("TAGETEST Misprediction on %x, cycle %d\n", train.pc, cur_cycle);
                     `endif
-                    allocate(train, taken);
-                    updateWithTrain(taken, train, mispred);
+                    let ind <- allocate(train, taken);
+                    updateWithTrain(taken, train, mispred, ind);
                 end
                 else (* nosplit *) begin
                     `ifdef DEBUG_TAGETEST
                     $display("TAGETEST correct prediction on %x, cycle %d\n", train.pc, cur_cycle);
                     `endif
-                    updateWithTrain(taken, train, mispred);
+                    updateWithTrain(taken, train, mispred, tagged Invalid);
                 end
             end
         endmethod
