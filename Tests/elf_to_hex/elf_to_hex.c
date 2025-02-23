@@ -32,7 +32,7 @@
 // writing it back out to the output file.
 
 // #define MAX_MEM_SIZE (((uint64_t) 0x400) * ((uint64_t) 0x400) * ((uint64_t) 0x400))
-#define MAX_MEM_SIZE ((uint64_t) 0x90000000)
+#define MAX_MEM_SIZE ((uint64_t) 0xf0000000)
 
 uint8_t *mem_buf;    // Is malloc'd in main
 
@@ -254,7 +254,7 @@ void c_mem_load_elf (char *elf_filename,
 // ================================================================
 // Min and max byte addrs for various mem sizes
 
-#define BASE_ADDR_B  0x80000000lu
+#define BASE_ADDR_B  0xc0000000lu
 
 // For 16 MB memory at 0x_8000_0000
 #define MIN_MEM_ADDR_16MB  BASE_ADDR_B

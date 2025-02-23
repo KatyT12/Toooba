@@ -66,10 +66,10 @@ SoC_Map_Struct soc_map_struct =
 SoC_Map_Struct {
    near_mem_io_addr_base: 'h_0200_0000,
 
-   main_mem_addr_base:    'h_8000_0000,
+   main_mem_addr_base:    'h_c000_0000,
    main_mem_addr_size:    'h_1000_0000,
 
-   pc_reset_value:        'h_0000_1000
+   pc_reset_value:        'h_c000_0000 // ?
    };
 
 // ================================================================
@@ -166,7 +166,7 @@ module mkSoC_Map (SoC_Map_IFC);
    // ----------------------------------------------------------------
    // Main Mem Controller 0
 
-   Fabric_Addr mem0_controller_addr_base = 'h_8000_0000;
+   Fabric_Addr mem0_controller_addr_base = 'h_c000_0000;
    Fabric_Addr mem0_controller_addr_size = 'h_1000_0000;    // 256 MB
    Fabric_Addr mem0_controller_addr_lim  = mem0_controller_addr_base + mem0_controller_addr_size;
 
@@ -226,7 +226,7 @@ module mkSoC_Map (SoC_Map_IFC);
    // ----------------------------------------------------------------
    // PC, MTVEC and NMIVEC reset values
 
-   Bit #(64) pc_reset_value     = boot_rom_addr_base;
+   Bit #(64) pc_reset_value     = 'h_c000_0000; // TEMP
    Bit #(64) mtvec_reset_value  = 'h1000;    // TODO
    Bit #(64) nmivec_reset_value = ?;         // TODO
 
