@@ -310,8 +310,10 @@ module mkFetchStage(FetchStage);
     SupFifo#(SupSizeX2, 3, Fetch2ToDecode) f2d <- mkUGSupFifo; // Unguarded to prevent the static analyser from exploding.
     SupFifo#(SupSize, 3, FromFetchStage) out_fifo <- mkSupFifo;
     
+    Wire#(Vector#(SupSizeX2, Maybe#(DirPredIn))) newBranches <- mkDWire(replicate(tagged Invalid));
+    Wire#(Bit#(TAdd#(TLog#(SupSizeX2),1))) newBranchesCount <- mkDWire(0);
     // May be overkill
-    SupFifo#(SupSizeX2, 4, PredIn) predInput <- mkUGSupFifo;
+    SupFifo#(SupSizeX2, 4, DirPredIn) predInput <- mkUGSupFifo;
        // Can the fifo size be smaller?
 
     // Branch Predictors
@@ -391,6 +393,51 @@ module mkFetchStage(FetchStage);
         if (verbosity >= 2) $display ("%d Fetch Translate: pc: %x, ", cur_cycle, translateAddress.first, fshow (tr));
     endrule
 
+    (* fire_when_enabled, no_implicit_conditions *)
+    rule feedPredictor;
+        // Set up branch prediction
+        // Nicer to have a FIFO which handles the bypass, but complications
+        Bit#(TAdd#(TLog#(SupSizeX2),1)) enqCount = 0; // Because SpecFifo forces consecutive enqueues
+        Vector#(SupSize, Maybe#(DirPredIn)) in = replicate(tagged Invalid);
+        let branches = newBranches;
+
+        for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
+            if(predInput.deqS[i].canDeq) begin // Missing guard?
+                predInput.deqS[i].deq;
+
+                `ifdef DEBUG_TAGETEST
+                $display("Enqueue %d to %d\n", i, enqCount);
+                `endif
+                
+                in[i] = tagged Valid predInput.deqS[i].first;
+            end
+            else begin
+                in[i] = branches[enqCount];
+                if(isValid(branches[enqCount]))
+                    enqCount = enqCount + 1;
+            end
+        end
+
+        // Possible remaining branches
+        Bit#(TLog#(SupSizeX2)) enqNum = truncate(newBranchesCount - enqCount); // Not a fan, a better way to do this>
+        for(Integer i = 0; fromInteger(i) < enqNum; i = i + 1) begin
+            if(isValid(branches[enqCount])) begin
+                if(predInput.enqS[i].canEnq) begin
+                    `ifdef DEBUG_TAGETEST
+                    $display("Enqueue %x %d\n", validValue(branches[enqCount]).pc, i);
+                    `endif
+                    predInput.enqS[i].enq(validValue(branches[enqCount]));
+                    enqCount = enqCount + 1;
+                end 
+                else
+                    doAssert(False, "Failed to enqueue to predIn\n");
+            end
+        end
+        // Trigger branch predictor
+        dirPred.nextPc(in);
+    endrule
+
+
     // doFetch1 pulls a prediction out of the BTB and attempts to translate it
     // from a small buffer (~2) of recent TLB translations.
     // If the necessary translation is not in the buffer, doFetch1 submits a TLB
@@ -402,32 +449,33 @@ module mkFetchStage(FetchStage);
         // Grab a chain of predictions from the BTB, which predicts targets for the next
         // set of addresses based on the current PC.
         Vector#(SupSizeX2, Tuple2#(Maybe#(Addr), Bool)) pred_future_pc = nextAddrPred.pred;
+        let fastPredictions <- dirPred.fastPred(pc); //  Integrate more with the BTB
 
         // Next pc is the first nextPc that breaks the chain of pc+4 or
         // that is at the end of a cacheline.
+
         Vector#(SupSizeX2,Integer) indexes = genVector;
         function Bool findNextPc(Addr in_pc, Integer i);
             Bool notLastInst = getLineInstOffset(in_pc + fromInteger(2*i)) != maxBound;
-            Bool noJump = !isValid(tpl_1(pred_future_pc[i]));
+            Bool noJump = !(!tpl_2(pred_future_pc[i]) && isValid(tpl_1(pred_future_pc[i]))) && !(tpl_2(pred_future_pc[i]) && fastPredictions[i].taken); //!isValid(tpl_1(pred_future_pc[i]));//
             return (!(notLastInst && noJump));
         endfunction
         Bit#(TLog#(SupSizeX2)) posLastSupX2 = fromInteger(fromMaybe(valueof(SupSizeX2) - 1, find(findNextPc(pc), indexes)));
-        Maybe#(Addr) pred_next_pc = tpl_1(pred_future_pc[posLastSupX2]);
+        Maybe#(Addr) pred_next_pc = (!fastPredictions[posLastSupX2].taken && tpl_2(pred_future_pc[posLastSupX2])) ? tagged Invalid : tpl_1(pred_future_pc[posLastSupX2]);
 
-        Vector#(SupSize, Maybe#(PredIn)) in = replicate(tagged Invalid);
-        Vector#(SupSizeX2, Maybe#(PredIn)) branches = replicate(tagged Invalid);
-        Bit#(SupSizeX2) mask = 0;
+        Vector#(SupSizeX2, Maybe#(DirPredIn)) branches = replicate(tagged Invalid);
         Bit#(TAdd#(TLog#(SupSizeX2),1)) count = 0;
-        Bit#(TAdd#(TLog#(SupSizeX2),1)) enqCount = 0; // Because SpecFifo forces consecutive enqueues
+        Bit#(SupSizeX2) mask = 0;
         
         // How to do this efficiently??? !
         for(Integer i = 0; i < valueOf(SupSizeX2) && fromInteger(i) <= posLastSupX2; i = i + 1) begin
             if (tpl_2(pred_future_pc[i])) begin
-                branches[count] = tagged Valid PredIn{pc: pc + fromInteger(2*i), main_epoch: f_main_epoch, decode_epoch: decode_epoch[0]};
+                branches[count] = tagged Valid DirPredIn{pc: pc + fromInteger(2*i), fastTrainInfo: fastPredictions[i],  main_epoch: f_main_epoch, decode_epoch: decode_epoch[0]};
                 count = count + 1;
                 mask[i] = 1;
             end
         end
+        
 
         `ifdef DEBUG_TAGETEST
         $display("FETCH1 %x, Cycle: %d last inst: %d branch count: %d", pc, cur_cycle, posLastSupX2, count);
@@ -465,6 +513,11 @@ module mkFetchStage(FetchStage);
                 endcase
             end
 
+            
+            newBranchesCount <= count;
+            newBranches <= branches;
+        
+
             let out = Fetch1ToFetch2 {
                 pc: compressPc(pc_idx, pc),
                 inst_frags_fetched: posLastSupX2,
@@ -477,43 +530,6 @@ module mkFetchStage(FetchStage);
                 branches_predicted: mask
             };
             fetch1toFetch2.enq(out);
-
-            // Set up branch prediction
-            // Nicer to have a FIFO which handles the bypass, but complications
-            for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
-                if(predInput.deqS[i].canDeq) begin // Missing guard?
-                    predInput.deqS[i].deq;
-
-                    `ifdef DEBUG_TAGETEST
-                    $display("Enqueue %d to %d\n", i, enqCount);
-                    `endif
-                    
-                    in[i] = tagged Valid predInput.deqS[i].first;
-                end
-                else begin
-                    in[i] = branches[enqCount];
-                    if(isValid(branches[enqCount]))
-                        enqCount = enqCount + 1;
-                end
-            end
-
-            // Possible remaining branches
-            Bit#(TLog#(SupSizeX2)) enqNum = truncate(count - enqCount); // Not a fan, a better way to do this>
-            for(Integer i = 0; fromInteger(i) < enqNum; i = i + 1) begin
-                if(isValid(branches[enqCount])) begin
-                    if(predInput.enqS[i].canEnq) begin
-                        `ifdef DEBUG_TAGETEST
-                        $display("Enqueue %d\n", i);
-                        `endif
-                        predInput.enqS[i].enq(validValue(branches[enqCount]));
-                        enqCount = enqCount + 1;
-                    end 
-                    else
-                        doAssert(False, "Failed to enqueue to predIn\n");
-                end
-            end
-            // Trigger branch predictor
-            dirPred.nextPc(in);
 
             if (verbosity >= 2) begin
                 $display ("%d ----------------", cur_cycle);
@@ -609,7 +625,7 @@ module mkFetchStage(FetchStage);
    endfunction
    Vector#(SupSize,Integer) indices = genVector;
 
-   rule doDecode(f2d.deqS[0].canDeq && isCurrent(f2d.deqS[0].first) && all(isCurrentOrEmptyPred, indices));
+   rule doDecode(f2d.deqS[0].canDeq && isCurrent(f2d.deqS[0].first)/*( && all(isCurrentOrEmptyPred, indices)*/);
       Vector#(SupSize, Maybe#(InstrFromFetch2)) decodeIn = replicate(Invalid);
       // Express the incoming fragments as a vector of maybes.
       Vector#(SupSizeX2, Maybe#(Fetch2ToDecode)) frags;
@@ -704,20 +720,22 @@ module mkFetchStage(FetchStage);
 
                     if(in.predicted_branch) begin
                         let recieved <- dirPred.pred[branchCountRecieved].pred;
-                        dir_pred = validValue(recieved);
+                        if(isValid(recieved)) begin
+                            dir_pred = validValue(recieved);
 
-                        likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
+                            likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
 
-                        branchResults[trueBranchCount] = pack(dir_pred.taken);
-                        trueBranchCount = trueBranchCount + 1;
-                        
-                        `ifdef DEBUG_TAGETEST
-                        doAssert(dir_pred.pc == last_x16_pc, "Branch PC is inconsistent\n");
-                        $display("PREDICT with %x %x %d ID=%d %d\n", pc, dir_pred.pc, dir_pred.taken, dir_spec, dirPred.getSpec(trueBranchCount+1));
-                        `endif
+                            branchResults[trueBranchCount] = pack(dir_pred.taken);
+                            trueBranchCount = trueBranchCount + 1;
+                            
+                            `ifdef DEBUG_TAGETEST
+                            $display("PREDICT with %x %x %d ID=%d %d\n", pc, dir_pred.pc, dir_pred.taken, dir_spec, dirPred.getSpec(trueBranchCount+1));
+                            doAssert(dir_pred.pc == last_x16_pc, "Branch PC is inconsistent\n");
+                            `endif
+                        end
                     end
                     else begin
-                        let next = decodeBrPred(pc, decode_result.dInst, False, (validValue(decodeIn[i]).inst_kind == Inst_32b));
+                        let next = decodeBrPred(pc, decode_result.dInst, True, (validValue(decodeIn[i]).inst_kind == Inst_32b));
                         trainNAP = Valid (TrainNAP {pc: last_x16_pc, nextPc: validValue(next), branch: decode_result.dInst.iType == Br});
                         dir_spec = unpack(0);
                     end
@@ -808,7 +826,12 @@ module mkFetchStage(FetchStage);
                      `ifdef DEBUG_TAGETEST
                      $display("DECODE NAP TRAIN %x\n", last_x16_pc);
                      `endif
-                     trainNAP = Valid (TrainNAP {pc: last_x16_pc, nextPc: decode_pred_next_pc, branch: decode_result.dInst.iType == Br});
+                     if(decode_result.dInst.iType != Br)
+                        trainNAP = Valid (TrainNAP {pc: last_x16_pc, nextPc: decode_pred_next_pc, branch: False});
+                    else begin
+                        let next = validValue(decodeBrPred(pc, decode_result.dInst, True, (validValue(decodeIn[i]).inst_kind == Inst_32b)));
+                        trainNAP = Valid (TrainNAP {pc: last_x16_pc, nextPc: next, branch: True});
+                    end
 `ifdef PERF_COUNT
                      // performance stats: record decode redirect
                      doAssert(redirectInst == Invalid, "at most 1 decode redirect per cycle");
@@ -856,7 +879,8 @@ module mkFetchStage(FetchStage);
       end
       
       for(Integer i = 0; i < valueOf(SupSize) && fromInteger(i) < branchCountRecieved; i = i +1) begin
-        dirPred.clearIfc[i].deq;
+        if(dirPred.clearIfc[i].canDeq) // Should not be needed
+            dirPred.clearIfc[i].deq;
       end
 
       dirPred.confirmPred(branchResults, trueBranchCount);
@@ -975,7 +999,9 @@ module mkFetchStage(FetchStage);
         // train next addr pred when mispred
         if(mispred) begin
             let last_x16_pc = pc + (isCompressed ? 0 : 2);
-            napTrainByExe.wset(TrainNAP {pc: last_x16_pc, nextPc: next_pc, branch: iType == Br});
+            if(!(iType != Br && next_pc == last_x16_pc+2)) begin
+                napTrainByExe.wset(TrainNAP {pc: last_x16_pc, nextPc: next_pc, branch: iType == Br});
+            end
         end
     endmethod
 
