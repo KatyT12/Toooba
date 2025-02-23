@@ -38,12 +38,16 @@ import GSharePred::*;
 import TourPred::*;
 
 import TourPredSecure::*;
-import TageTest::*;
+import TourPredStaged::*; FOR NOW
 */
-import TourPredStaged::*;
+import TageTest::*;
+
+
 
 export DirPredTrainInfo(..);
 export DirPredSpecInfo(..);
+export DirPredFastTrainInfo(..);
+export DirPredIn;
 export mkDirPredictor;
 
 `ifdef DIR_PRED_BHT
@@ -69,10 +73,12 @@ typedef BimodalTrainInfo DirPredTrainInfo;
 `ifdef DIR_PRED_TAGETEST
 typedef TageTestTrainInfo DirPredTrainInfo;
 typedef TageTestSpecInfo DirPredSpecInfo;
+typedef TageTestFastTrainInfo DirPredFastTrainInfo;
 `endif
 
+typedef PredIn#(DirPredFastTrainInfo) DirPredIn;
 //(* synthesize *)
-module mkDirPredictor#(Vector#(SupSize, SupFifoEnq#(GuardedResult#(DirPredTrainInfo, DirPredSpecInfo))) in)(DirPredictor#(DirPredTrainInfo, DirPredSpecInfo));
+module mkDirPredictor(DirPredictor#(DirPredTrainInfo, DirPredSpecInfo, DirPredFastTrainInfo));
 `ifdef DIR_PRED_BHT
 `ifdef SECURITY
     staticAssert(False, "BHT with flush methods is not implemented");
@@ -110,7 +116,7 @@ module mkDirPredictor#(Vector#(SupSize, SupFifoEnq#(GuardedResult#(DirPredTrainI
 `endif
 
 `ifdef DIR_PRED_TOUR_STAGED
-    let m <- mkTourPredStaged(in);
+    let m <- mkTourPredStaged;
 `endif
 
     return m;

@@ -8,11 +8,13 @@ import ProcTypes::*;
 import Types::*;
 import Tage::*;
 import GlobalBranchHistory::*;
+import Fifos::*;
 // For debugging
 import Cur_Cycle :: *;
 
 export TageTestTrainInfo;
 export TageTestSpecInfo;
+export TageTestFastTrainInfo;
 export Entry;
 export PCIndex;
 export PCIndexSz;
@@ -21,29 +23,13 @@ export mkTageTest;
 `define NUM_TABLES 7
 typedef TageTrainInfo#(`NUM_TABLES) TageTestTrainInfo;
 typedef TageSpecInfo TageTestSpecInfo;
+typedef TageFastTrainInfo TageTestFastTrainInfo;
 
-module mkTageTest(DirPredictor#(TageTrainInfo#(`NUM_TABLES), TageSpecInfo));
+module mkTageTest(DirPredictor#(TageTrainInfo#(`NUM_TABLES), TageSpecInfo, TageTestFastTrainInfo));
     Reg#(Bool) starting <- mkReg(True);
     Tage#(7) tage <- mkTage;
     Reg#(UInt#(64)) predCount <- mkReg(0);
     Reg#(UInt#(64)) misPredCount <- mkReg(0);
-    Reg#(Addr) currentPc <- mkRegU;
-
-
-    
-    Vector#(SupSize, DirPred#(TageTrainInfo#(`NUM_TABLES), TageSpecInfo)) predIfc;
-    for(Integer i=0; i < valueOf(SupSize); i=i+1) begin
-        predIfc[i] = (interface DirPred;
-        
-        method ActionValue#(DirPredResult#(TageTrainInfo#(`NUM_TABLES), TageSpecInfo)) pred;
-            //$display("Cycle %0d, TAGETEST, Prediction on %x\n", cur_cycle, currentPc);
-            let result <- tage.dirPredInterface.pred[i].pred;
-            return result;
-        endmethod
-        endinterface);
-    end
-    
-    interface pred = predIfc;
 
     method Action update(Bool taken, TageTrainInfo#(`NUM_TABLES) train, Bool mispred);
         predCount <= predCount+1;
@@ -54,13 +40,28 @@ module mkTageTest(DirPredictor#(TageTrainInfo#(`NUM_TABLES), TageSpecInfo));
         tage.dirPredInterface.update(taken, train, mispred);
     endmethod
 
-    method Action nextPc(Addr pc);
-        tage.dirPredInterface.nextPc(pc);
-        currentPc <= pc;
+    interface pred = tage.dirPredInterface.pred;
+    interface clearIfc = tage.dirPredInterface.clearIfc;
+
+    method Action confirmPred(Bit#(SupSize) results, SupCnt count);
+        tage.dirPredInterface.confirmPred(results, count);
     endmethod
 
-    method Action specRecover(TageSpecInfo specInfo, Bool taken);
-        tage.dirPredInterface.specRecover(specInfo, taken);
+    method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(TageFastTrainInfo))) next);
+        tage.dirPredInterface.nextPc(next);
+    endmethod
+
+    method ActionValue#(Vector#(SupSizeX2, FastPredictResult#(TageFastTrainInfo))) fastPred(Addr pc); // No training
+        let a <- tage.dirPredInterface.fastPred(pc);
+        return a;
+    endmethod
+
+    method Action specRecover(TageSpecInfo specInfo, Bool taken, Bool nonBranch);
+        tage.dirPredInterface.specRecover(specInfo, taken, nonBranch);
+    endmethod
+
+    method TageSpecInfo getSpec(SupCnt i);
+        return tage.dirPredInterface.getSpec(i);
     endmethod
 
     method flush = noAction;

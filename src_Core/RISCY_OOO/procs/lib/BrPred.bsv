@@ -25,6 +25,7 @@ import Types::*;
 import ProcTypes::*;
 import EpochManager::*;
 import Vector::*;
+import Fifos::*;
 
 (* noinline *)
 function Maybe#(Addr) decodeBrPred( Addr pc, DecodedInst dInst, Bool histTaken, Bool is_32b_inst);
@@ -59,32 +60,49 @@ typedef struct {
     trainInfoT train;
     // For debug
     Addr pc;
-    specInfoT spec;
-} DirPredResult#(type trainInfoT, type specInfoT) deriving(Bits, Eq, FShow);
+} DirPredResult#(type trainInfoT) deriving(Bits, Eq, FShow);
 
 typedef struct {
-    DirPredResult#(trainInfoT, specInfoT) result;
+  Bool taken;
+  fastTrainInfoT train;
+} FastPredictResult#(type fastTrainInfoT) deriving(Bits, Eq, FShow);
+
+typedef struct {
+    DirPredResult#(trainInfoT) result;
     Epoch main_epoch;
     Bool decode_epoch;
-} GuardedResult#(type trainInfoT, type specInfoT) deriving(Bits, Eq, FShow);
+} GuardedResult#(type trainInfoT) deriving(Bits, Eq, FShow);
 
 typedef struct {
   Addr pc;
+  FastPredictResult#(fastTrainInfoT) fastTrainInfo;
   Epoch main_epoch;
   Bool decode_epoch;
-} PredIn deriving(Bits, Eq, FShow);
+} PredIn#(type fastTrainInfoT) deriving(Bits, Eq, FShow);
 
 
-interface DirPred#(type trainInfoT, type specInfoT);
-  method ActionValue#(Maybe#(GuardedResult#(trainInfoT, specInfoT))) pred;
+interface DirPred#(type trainInfoT);
+  method ActionValue#(Maybe#(DirPredResult#(trainInfoT))) pred;
 endinterface
 
-interface DirPredictor#(type trainInfoT, type specInfoT);
-    method Action nextPc(Vector#(SupSize,Maybe#(PredIn)) next);
-    method Action specRecover(specInfoT specInfo, Bool taken);
+interface DirPredictor#(type trainInfoT, type specInfoT, type fastTrainInfoT);
+    method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(fastTrainInfoT))) next);
+    method Action specRecover(specInfoT specInfo, Bool taken, Bool nonBranch);
     //interface Vector#(SupSize, DirPred#(trainInfoT, specInfoT)) pred;
     method Action update(Bool taken, trainInfoT train, Bool mispred);
+    
+    // Does it need to be tagged. Should always be able to provide a result when called
+    interface Vector#(SupSize, DirPred#(trainInfoT)) pred;
+    method ActionValue#(Vector#(SupSizeX2, FastPredictResult#(fastTrainInfoT))) fastPred(Addr pc); // No training
+    
     method Action confirmPred(Bit#(SupSize) results, SupCnt count); // By decode stage, for speculative history and end_pointer update
+    
+    // Could instead be fully inside the predictor without exposing this interface, but still need to communicate 
+    // the current main_epoch and decode.epoch each cycle, also every predictor will need this added logic, sounds like a pain
+    interface Vector#(SupSize, SupFifoDeq#(GuardedResult#(trainInfoT))) clearIfc;
+
+    method specInfoT getSpec(SupCnt i);
+
     method Action flush;
     method Bool flush_done;
 endinterface
