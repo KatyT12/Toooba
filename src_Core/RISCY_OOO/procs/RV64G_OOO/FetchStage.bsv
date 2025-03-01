@@ -970,10 +970,8 @@ module mkFetchStage(FetchStage);
     (* fire_when_enabled, no_implicit_conditions *)
     rule doSpecRecover(isValid(decodeSpecRecover.wget) || isValid(aluSpecRecover.wget));
         SpecRecoverInfo update = fromMaybe(validValue(decodeSpecRecover.wget), aluSpecRecover.wget);
-        
-        Bool fromALU = isValid(aluSpecRecover.wget);
         `ifdef DEBUG_TAGETEST
-        $display("Trigger spec recover From ALU: %d %d %d\n", fromALU, update.taken, update.notBranch);
+        $display("Recover Cycle: %d\n", cur_cycle);
         `endif
         dirPred.specRecover(update.specInfo, update.taken, update.nonBranch);
     endrule
