@@ -779,7 +779,7 @@ module mkTage(Tage#(numTables)) provisos(
         
         // Recover histories before table writes
         method Action specRecover(TageSpecInfo specInfo, Bool taken, Bool nonBranch);
-            (* split *)
+            $display("TAGETEST SpecRecover called in cycle: %d\n", cur_cycle);
             if(specInfo.confirmed) begin
                 recovered.send;
                 specInfoUpdate.wset(SpecUpdateInfo{specInfo: specInfo, taken: taken, nonBranch: nonBranch});

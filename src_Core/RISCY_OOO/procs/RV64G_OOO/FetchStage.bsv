@@ -634,6 +634,7 @@ module mkFetchStage(FetchStage);
          end
    endrule: doDecodeFlush
 
+   (* fire_when_enabled, no_implicit_conditions *)
    rule doDecodeFlushPred(dirPred.clearIfc[0].canDeq && !isCurrentPred(dirPred.clearIfc[0].first));
     for (Integer i = 0; i < valueOf(SupSize); i = i + 1)
        if (dirPred.clearIfc[i].canDeq &&& !isCurrentPred(dirPred.clearIfc[i].first)) begin
@@ -704,7 +705,7 @@ module mkFetchStage(FetchStage);
 
       Maybe#(Addr) redirectPc = Invalid; // next pc redirect by branch predictor
       Maybe#(TrainNAP) trainNAP = Invalid; // training data sent to next addr pred
-      Maybe#(Tuple3#(DirPredSpecInfo, Bool, Bool)) recover = Invalid;
+      Maybe#(Tuple3#(DirPredSpecInfo, Bool, Bool)) recover = tagged Invalid;
       Bool decode_epoch_local = decode_epoch[0]; // next value for decode epoch
 `ifdef PERF_COUNT
       // performance counter: inst being redirect by decode stage
@@ -747,8 +748,11 @@ module mkFetchStage(FetchStage);
                 Bit#(1) took <- dummy(1);
                 dir_pred.taken = unpack(took);
 
+                
+                `ifdef DEBUG_TAGETEST $display("DECODE on %x, Cycle: %d, Predicted branch %d, Type:", pc, cur_cycle, in.predicted_branch, fshow(decode_result.dInst.iType)); `endif
                 if(in.predicted_branch) begin
-                    let recieved <- dirPred.pred[i].pred; 
+                    `ifdef DEBUG_TAGETEST $display("(Debug) Predicted branch = %d\n", in.predicted_branch) `endif
+                    let recieved <- dirPred.pred[i].pred;  // Where pred is called
                     $display("DECODE DEQUEUE on %x ", pc, fshow(decode_result.dInst.iType), "\n");
                     
                     if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
@@ -966,6 +970,11 @@ module mkFetchStage(FetchStage);
     (* fire_when_enabled, no_implicit_conditions *)
     rule doSpecRecover(isValid(decodeSpecRecover.wget) || isValid(aluSpecRecover.wget));
         SpecRecoverInfo update = fromMaybe(validValue(decodeSpecRecover.wget), aluSpecRecover.wget);
+        
+        Bool fromALU = isValid(aluSpecRecover.wget);
+        `ifdef DEBUG_TAGETEST
+        $display("Trigger spec recover From ALU: %d %d %d\n", fromALU, update.taken, update.notBranch);
+        `endif
         dirPred.specRecover(update.specInfo, update.taken, update.nonBranch);
     endrule
 
