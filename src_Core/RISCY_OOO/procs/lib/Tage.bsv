@@ -592,7 +592,7 @@ module mkTage(Tage#(numTables)) provisos(
             global.updateRecoveredHistory(pack(taken));
 
             `ifdef DEBUG_TAGETEST   
-                $display("TAGETEST Misprediction on %x, cycle %d\n", train.tageInfo.pc, cur_cycle);
+                $display("TAGETEST Misprediction on %x, cycle %d\n", specInfo.ooIndex, cur_cycle);
             `endif
             for (Integer i = 0; i < valueOf(numTables); i = i +1) begin
                 let tab = taggedTablesVector[i];
