@@ -20,6 +20,7 @@ export mkTageTest;
 `define NUM_TABLES 7
 typedef OOTageTrainInfo#(`NUM_TABLES) TageTestTrainInfo;
 
+(* synthesize *)
 module mkTageTest(DirPredictor#(OOTageTrainInfo#(`NUM_TABLES)));
     Reg#(Bool) starting <- mkReg(True);
     Tage#(7) tage <- mkTage;
