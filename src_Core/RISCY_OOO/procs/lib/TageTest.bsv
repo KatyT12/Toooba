@@ -23,7 +23,7 @@ typedef TageTrainInfo#(`NUM_TABLES) TageTestTrainInfo;
 typedef TageSpecInfo TageTestSpecInfo;
 
 (* synthesize *)
-module mkTageTest(DirPredictor#(OOTageTrainInfo#(`NUM_TABLES)));
+module mkTageTest(DirPredictor#(TageTestTrainInfo));
     Reg#(Bool) starting <- mkReg(True);
     Tage#(7) tage <- mkTage;
     Reg#(UInt#(64)) predCount <- mkReg(0);
