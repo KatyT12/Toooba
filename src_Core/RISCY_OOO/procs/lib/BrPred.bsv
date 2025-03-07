@@ -23,9 +23,11 @@
 
 import Types::*;
 import ProcTypes::*;
+import EpochManager::*;
 import Vector::*;
+import Fifos::*;
 
-(* noinline *)
+//(* noinline *)
 function Maybe#(Addr) decodeBrPred( Addr pc, DecodedInst dInst, Bool histTaken, Bool is_32b_inst);
   Addr pcPlusN = pc + (is_32b_inst ? 4 : 2);
   Data imm_val = fromMaybe(?, getDInstImm(dInst));
@@ -55,17 +57,50 @@ function Addr offsetPc(Addr pc, Integer i) = {truncateLSB(pc), pc[7:0] + (fromIn
 
 typedef struct {
     Bool taken;
-    trainInfoT train; // info that a branch must keep for future training
+    trainInfoT train;
+    // For debug
+    Addr pc;
 } DirPredResult#(type trainInfoT) deriving(Bits, Eq, FShow);
 
+typedef struct {
+  Bool taken;
+  fastTrainInfoT train;
+} FastPredictResult#(type fastTrainInfoT) deriving(Bits, Eq, FShow);
+
+typedef struct {
+    t result;
+    Epoch main_epoch;
+    Bool decode_epoch;
+} GuardedResult#(type t) deriving(Bits, Eq, FShow);
+
+typedef struct {
+  Addr pc;
+  FastPredictResult#(fastTrainInfoT) fastTrainInfo;
+  Epoch main_epoch;
+  Bool decode_epoch;
+} PredIn#(type fastTrainInfoT) deriving(Bits, Eq, FShow);
+
 interface DirPred#(type trainInfoT);
-    method ActionValue#(DirPredResult#(trainInfoT)) pred;
+  method ActionValue#(Maybe#(DirPredResult#(trainInfoT))) pred;
 endinterface
 
-interface DirPredictor#(type trainInfoT);
-    method Action nextPc(Addr nextPc);
-    interface Vector#(SupSize, DirPred#(trainInfoT)) pred;
+interface DirPredictor#(type trainInfoT, type specInfoT, type fastTrainInfoT); //Exposed types
+    method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(fastTrainInfoT))) next);
+    method Action specRecover(specInfoT specInfo, Bool taken, Bool nonBranch);
+    //interface Vector#(SupSize, DirPred#(trainInfoT, specInfoT)) pred;
     method Action update(Bool taken, trainInfoT train, Bool mispred);
+    
+    // Does it need to be tagged. Should always be able to provide a result when called
+    interface Vector#(SupSize, DirPred#(trainInfoT)) pred;
+    method ActionValue#(Vector#(SupSizeX2, FastPredictResult#(fastTrainInfoT))) fastPred(Addr pc); // No training
+    
+    // Could instead be fully inside the predictor without exposing this interface, but still need to communicate 
+    // the current main_epoch and decode.epoch each cycle, also every predictor will need this added logic, sounds like a pain
+    interface Vector#(SupSize, SupFifoDeq#(GuardedResult#(DirPredResult#(trainInfoT)))) clearIfc;
+
+    method Vector#(SupSizeX2, specInfoT) getSpec(Bit#(SupSizeX2) mask);
+    method Action updateSpec(Bit#(TAdd#(TLog#(SupSizeX2),1)) i);
+
     method Action flush;
     method Bool flush_done;
 endinterface
