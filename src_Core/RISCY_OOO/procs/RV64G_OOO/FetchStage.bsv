@@ -87,6 +87,7 @@ interface FetchStage;
         Addr pc, Addr next_pc, IType iType, Bool taken,
         DirPredTrainInfo dpTrain, Bool mispred, Bool isCompressed
     );
+    method Action train_nap(Addr pc, Addr next_pc, Bool isCompressed);
 
     method Action recover_spec(DirPredSpecInfo dpSpec, Bool taken);
 
@@ -829,11 +830,11 @@ module mkFetchStage(FetchStage);
             // Train the direction predictor for all branches
             dirPred.update(taken, dpTrain, mispred);
         end
-        // train next addr pred when mispred
-        if(mispred) begin
-            let last_x16_pc = pc + (isCompressed ? 0 : 2);
-            napTrainByExe.wset(TrainNAP {pc: last_x16_pc, nextPc: next_pc});
-        end
+    endmethod
+
+    method Action train_nap(Addr pc, Addr next_pc, Bool isCompressed);
+        let last_x16_pc = pc + (isCompressed ? 0 : 2);
+        napTrainByExe.wset(TrainNAP {pc: last_x16_pc, nextPc: next_pc});
     endmethod
 
     // security

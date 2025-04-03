@@ -309,6 +309,7 @@ module mkCore#(CoreId coreId)(Core);
         end
 
         Vector#(AluExeNum, SpecFifo#(TDiv#(`NUM_SPEC_TAGS,2), FetchTrainBP, 1, 1)) trainBPQ <- replicateM(mkSpecFifoUG(True));
+        Vector#(AluExeNum, FIFO#(FetchTrainNAP)) trainNAP <- replicateM(mkFIFO);
         Vector#(AluExeNum, SpeculationUpdate) btqSpecUpdate;
         for(Integer i = 0; i < valueof(AluExeNum); i = i+1) begin
             btqSpecUpdate[i] = trainBPQ[i].specUpdate;
@@ -377,6 +378,7 @@ module mkCore#(CoreId coreId)(Core);
                 method rob_getOrig_Inst = rob.getOrig_Inst[i].get;
                 method rob_setExecuted = rob.setExecuted_doFinishAlu[i].set;
                 method fetch_train_predictors = trainBPQ[i].enq;
+                method fetch_train_nap = toPut(trainNAP[i]).put;
                 method Action fetch_recover_spec(DirPredSpecInfo specInfo, Bool taken); 
                     fetchStage.recover_spec(specInfo, taken);
                 endmethod
@@ -407,6 +409,13 @@ module mkCore#(CoreId coreId)(Core);
                 fetchStage.train_predictors(
                     train.pc, train.nextPc, train.iType, train.taken,
                     train.dpTrain, train.mispred, train.isCompressed
+                );
+            endrule
+
+            rule doFetchTrainNAP;
+                let train <- toGet(trainNAP[i]).get;
+                fetchStage.train_nap(
+                    train.pc, train.nextPc, train.isCompressed
                 );
             endrule
         end

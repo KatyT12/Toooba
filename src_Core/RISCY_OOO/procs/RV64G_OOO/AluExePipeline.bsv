@@ -132,6 +132,12 @@ typedef struct {
     Bool isCompressed;
 } FetchTrainBP deriving(Bits, Eq, FShow);
 
+typedef struct {
+    Addr pc;
+    Addr nextPc;
+    Bool isCompressed;
+} FetchTrainNAP deriving(Bits, Eq, FShow);
+
 interface AluExeInput;
     // conservative scoreboard check in reg read stage
     method RegsReady sbCons_lazyLookup(PhyRegs r);
@@ -147,6 +153,7 @@ interface AluExeInput;
     method Action rob_setExecuted(InstTag t, Data dst_data, Maybe#(Data) csrData, ControlFlow cf);
     // Fetch stage
     method Action fetch_train_predictors(ToSpecFifo#(FetchTrainBP) train);
+    method Action fetch_train_nap(FetchTrainNAP train);
     method Action fetch_recover_spec(DirPredSpecInfo specInfo, Bool taken);
 
     // global broadcast methods
@@ -347,6 +354,12 @@ module mkAluExePipeline#(AluExeInput inIfc)(AluExePipeline);
             if(x.iType == Br) begin
                 inIfc.fetch_recover_spec(x.dpSpec, x.controlFlow.taken);
             end
+
+            inIfc.fetch_train_nap(FetchTrainNAP {
+                pc: x.controlFlow.pc,
+                nextPc: x.controlFlow.nextPc,
+                isCompressed: x.isCompressed    
+            });
 
             inIfc.fetch_train_predictors(ToSpecFifo{
                 data: FetchTrainBP {
