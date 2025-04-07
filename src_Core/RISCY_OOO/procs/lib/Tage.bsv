@@ -75,6 +75,10 @@ typedef Bit#(PCIndexSz) PCIndex;
 typedef 13 BimodalPredSz;
 typedef 11 BimodalHystSz;
 
+typedef 6 TrainTableIndexBits;
+typedef UInt#(TrainTableIndexBits) TrainTableIndex;
+typedef TExp#(TrainTableIndexBits) TrainTableSize;
+
 typedef Bit#(2) Entry;
 typedef Bit#(TLog#(numTables)) TableIndex#(numeric type numTables);
 
@@ -107,9 +111,13 @@ typedef struct{
 
     // May not be necessary
     Addr pc;
-    Bool confirmed;
 } TageTrainInfo#(numeric type numTables) deriving(Bits, Eq, FShow);
 
+typedef struct {
+    TrainTableIndex index;
+    Bool confirmed;
+    Addr pc;
+ } TageTrain deriving(Bits, Eq, FShow);
 //
 typedef struct {
     BimodalTableEntry counter;
@@ -118,10 +126,11 @@ typedef struct {
 typedef struct {
     Bool confirmed;    
     CircBuffIndex#(MaxSpecSize) ooIndex;
+    TrainTableIndex trainPointer;
 } TageSpecInfo deriving(Bits, Eq, FShow);
 
 typedef struct {
-    TageTrainInfo#(numTables) tageInfo;
+    TageTrain tageInfo;
     Bool mispred;
     Bool taken;
 } UpdateInfo#(numeric type numTables) deriving(Bits, Eq, FShow);
@@ -164,7 +173,7 @@ typedef union tagged {
 } TaggedEntrySizes deriving(Bits);
 
 interface Tage#(numeric type numTables);
-    interface DirPredictor#(TageTrainInfo#(numTables), TageSpecInfo, TageFastTrainInfo) dirPredInterface;
+    interface DirPredictor#(TageTrain, TageSpecInfo, TageFastTrainInfo) dirPredInterface;
     
     `ifdef DEBUG
         method Action debugTables(Addr pc);
@@ -178,12 +187,12 @@ endinterface
 
 /*
     Recover spec more urgent than update history - should be fine
-
 */
 module mkTage(Tage#(numTables)) provisos(
-    Bits#(TageTrainInfo#(numTables), a__),
-    Add#(1, b__, TLog#(TAdd#(1, numTables))),
-    Add#(c__, numTables, 20)
+    Bits#(TageTrain, a__),
+    Bits#(TageTrainInfo#(numTables), b__),
+    Add#(1, c__, TLog#(TAdd#(1, numTables))),
+    Add#(d__, numTables, 20)
 );
     GlobalBranchHistory#(GlobalHistoryLength) global <- mkGlobalBranchHistory;
 
@@ -199,6 +208,12 @@ module mkTage(Tage#(numTables)) provisos(
     Vector#(7, ChosenTaggedTables) taggedTablesVector = cons(T_9_9_5(t1), cons(T_9_9_9(t2), cons(T_9_10_15(t3), cons(T_9_10_25(t4), cons(T_9_11_44(t5), cons(T_9_11_76(t6), cons(T_9_12_130(t7), nil)))))));
     Reg#(UInt#(`METAPREDICTOR_CTR_SIZE)) alt_on_na <- mkReg(1 << (`METAPREDICTOR_CTR_SIZE-1));
     CircBuff#(MaxSpecSize, Bool) ooBuff <- mkCircBuff;
+    
+    // Either use EHRs or many rules
+    Vector#(TrainTableSize, Ehr#(2,TageTrainInfo#(numTables))) trainTable <- replicateM(mkEhr(unpack(0))); // Parametrize, overkill?
+    Ehr#(2, TrainTableIndex) trainPointer <- mkEhr(0);
+    Ehr#(TAdd#(SupSize,1), TrainTableIndex) trainPointerPred <- mkEhr(0);
+    Vector#(SupSize, RWire#(Tuple2#(TrainTableIndex, TageTrainInfo#(numTables)))) trainResults <- replicateM(mkRWire);
 
     Ehr#(TAdd#(1, SupSize), SupCnt) numPred <- mkEhr(0);
     Ehr#(TAdd#(1, SupSize), Bit#(SupSize)) predResults <- mkEhr(0);
@@ -212,11 +227,10 @@ module mkTage(Tage#(numTables)) provisos(
     Vector#(SupSize, Reg#(Maybe#(Pred1ToPred2Data#(numTables)))) pred1ToPred2 <- replicateM(mkDReg(tagged Invalid));
     Vector#(SupSize, Reg#(Maybe#(Pred2ToPred3Data#(numTables)))) pred2ToPred3 <- replicateM(mkDReg(tagged Invalid));
     
-    Vector#(SupSize, RWire#(GuardedResult#(DirPredResult#(TageTrainInfo#(numTables))))) bypassPred <- replicateM(mkRWire);
+    Vector#(SupSize, RWire#(GuardedResult#(DirPredResult#(TageTrain)))) bypassPred <- replicateM(mkRWire);
     
-    SupFifo#(SupSize, 6, GuardedResult#(DirPredResult#(TageTrainInfo#(numTables)))) resultFifo <- mkUGSupFifo; // Check size
+    SupFifo#(SupSize, 6, GuardedResult#(DirPredResult#(TageTrain))) resultFifo <- mkUGSupFifo; // Check size
     Ehr#(TAdd#(SupSize,1), SupCnt) bypassedCount <- mkEhr(0);
-    //Vector#(SupSize, PulseWire) usedPred <- replicateM(mkUnsafePulseWireOR);
     Ehr#(TAdd#(SupSize,1), Bit#(SupSize)) enqMask <- mkEhr(0);// Can't use a pulse wire :( scheduling conflict in same rule,   usedPred[bypassCount[i]].send
     Ehr#(TAdd#(SupSize,1), Bit#(TLog#(SupSize))) currentPred <- mkEhr(0);
 
@@ -298,6 +312,10 @@ module mkTage(Tage#(numTables)) provisos(
                 ret = tuple2(tagged Valid tuple3(x, entries[x], indices[x]), tagged Invalid);
         
         return tuple3(ret, replaceableEntries, usefulCounters);
+    endfunction
+
+    function TrainTableIndex nextTrainPointer(TrainTableIndex ind);
+        return ind == fromInteger(valueOf(TrainTableSize)-1) ? 0 : ind + 1;
     endfunction
 
     // WARNING - REMOVE ACTIONVALUE AFTER DEBUG
@@ -426,7 +444,6 @@ module mkTage(Tage#(numTables)) provisos(
         // Update history speculatively
             let num = numPred[valueOf(SupSize)];
             let results = predResults[valueOf(SupSize)];
-            //ooBuff.specAssignConfirmed(num);
 
             if(num != 0) begin
                 `ifdef DEBUG_TAGETEST   
@@ -440,12 +457,35 @@ module mkTage(Tage#(numTables)) provisos(
                     `CASE_ALL_TABLES(tab, (*/ t.updateHistory(results, num); /*))
                 end
             end
+            for(Integer j = 0; j < valueOf(SupSize); j = j +1) begin
+                if(trainResults[j].wget matches tagged Valid {.index, .train})
+                    trainTable[index][j] <= train;
+            end
       //  end
     endrule
+
+    /*
+    for(Integer i = 0; i < valueOf(TrainTableSize); i = i +1) begin
+        rule updateTrainTable;
+            for(Integer j = 0; j < valueOf(SupSize); j = j +1)
+                if(trainResults[i].wget matches tagged Valid {.index, .train} && index == valueOf(i))
+                    trainTable[index] <= train;
+        endrule
+    end*/
 
     (* no_implicit_conditions, fire_when_enabled *)
     rule recoverSpecHistory(recovered &&& specInfoUpdate.wget matches tagged Valid .specUpdate);
         let numBits <- ooBuff.handleMispred(specUpdate.specInfo.ooIndex, !specUpdate.nonBranch);
+        
+        if(specUpdate.nonBranch) begin
+            trainPointer[1] <= specUpdate.specInfo.trainPointer;
+            trainPointerPred[valueOf(SupSize)] <= specUpdate.specInfo.trainPointer;
+        end
+        else begin
+            trainPointer[1] <= nextTrainPointer(specUpdate.specInfo.trainPointer);
+            trainPointerPred[valueOf(SupSize)] <= nextTrainPointer(specUpdate.specInfo.trainPointer);
+        end
+        
         if(!(specUpdate.nonBranch && numBits == 0)) begin
             if(specUpdate.nonBranch)
                 numBits = numBits - 1;
@@ -515,7 +555,6 @@ module mkTage(Tage#(numTables)) provisos(
             ret.pc = pc;
             ret.indices = indices;
             ret.tags = tags;
-            ret.confirmed = True;
             ret.bimodal_prediction = in.fastTrainInfo.train.counter;
 
             numPred[i] <= numPred[i] + 1;
@@ -629,10 +668,13 @@ module mkTage(Tage#(numTables)) provisos(
                 $display("TAGETEST Prediction on: %x,%d, Taken: %d, cycle %d\n", ret.pc , i, ret.taken, cur_cycle);
             `endif
 
+            trainPointerPred[i] <= nextTrainPointer(trainPointerPred[i]);
+            trainResults[i].wset(tuple2(trainPointerPred[i], ret));
+
             let res =  GuardedResult{
                 result: DirPredResult{
                     taken: ret.taken,
-                    train: ret,
+                    train: TageTrain{index: trainPointerPred[i], confirmed: True, pc: result.pc},
                     pc: result.pc
                 },
                 main_epoch: in.main_epoch,
@@ -642,7 +684,6 @@ module mkTage(Tage#(numTables)) provisos(
             `ifdef DEBUG_TAGETEST
             $display("Pred3 on %x\n", result.pc);
             `endif
-            
             bypassPred[i].wset(res);
         endrule      
     end
@@ -651,7 +692,7 @@ module mkTage(Tage#(numTables)) provisos(
     (* no_implicit_conditions, fire_when_enabled *)
     rule enqWithoutBypass;
         SupCnt count = 0;
-        Vector#(SupSize, Maybe#(GuardedResult#(DirPredResult#(TageTrainInfo#(numTables))))) toEnq = replicate(tagged Invalid);
+        Vector#(SupSize, Maybe#(GuardedResult#(DirPredResult#(TageTrain)))) toEnq = replicate(tagged Invalid);
         for (Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
             if(bypassPred[i].wget matches tagged Valid .res &&& !unpack(enqMask[valueOf(SupSize)][i])) begin
                 toEnq[count] = tagged Valid res;
@@ -708,11 +749,11 @@ module mkTage(Tage#(numTables)) provisos(
     endmethod
     `endif
     
-    Vector#(SupSize, DirPred#(TageTrainInfo#(numTables))) predIfc;
+    Vector#(SupSize, DirPred#(TageTrain)) predIfc;
     for(Integer i = 0; i < valueof(SupSize); i = i+1) begin
         predIfc[i] = (interface DirPred;
-            method ActionValue#(Maybe#(DirPredResult#(TageTrainInfo#(numTables)))) pred;
-                DirPredResult#(TageTrainInfo#(numTables)) result = unpack(0);
+            method ActionValue#(Maybe#(DirPredResult#(TageTrain))) pred;
+                DirPredResult#(TageTrain) result = unpack(0);
                 if(!resultFifo.deqS[currentPred[i]].canDeq) begin
                     if(bypassPred[bypassedCount[i]].wget matches tagged Valid .res) begin
                         result = res.result;
@@ -737,23 +778,27 @@ module mkTage(Tage#(numTables)) provisos(
         endinterface);
     end
 
-    interface  dirPredInterface = interface DirPredictor#(TageTrainInfo#(numTables), TageSpecInfo);
-        method Action update(Bool taken, TageTrainInfo#(numTables) train, Bool mispred);
-            if(train.confirmed) begin
+    interface  dirPredInterface = interface DirPredictor#(TageTrain, TageSpecInfo);
+        method Action update(Bool taken, TageTrain train, Bool mispred);
+            if(train.confirmed) begin   
                 (* split *)
                 if(mispred) (* nosplit *) begin
                     // Retrieve allocation information for next update.
                     `ifdef DEBUG_TAGETEST
                     $display("TAGETEST Misprediction on %x, Actual: %d, Predicted:%d, cycle %d\n", train.pc, cur_cycle, taken, train.taken);
                     `endif
-                    allocate(train, taken);
-                    updateWithTrain(taken, train, mispred);
+                    let trainInfo = trainTable[train.index][0];
+                    doAssert(trainInfo.pc == train.pc, "Failed");
+                    allocate(trainInfo, taken);
+                    updateWithTrain(taken, trainInfo, mispred);
                 end
                 else (* nosplit *) begin
                     `ifdef DEBUG_TAGETEST
                     $display("TAGETEST correct prediction on %x, cycle %d\n", train.pc, cur_cycle);
                     `endif
-                    updateWithTrain(taken, train, mispred);
+                    let trainInfo = trainTable[train.index][0];
+                    doAssert(trainInfo.pc == train.pc, "Failed");
+                    updateWithTrain(taken, trainInfo, mispred);
                 end
             end
         endmethod
@@ -789,8 +834,16 @@ module mkTage(Tage#(numTables)) provisos(
         method Vector#(SupSizeX2, TageSpecInfo) getSpec(Bit#(SupSizeX2) mask);
             let indices = ooBuff.specAssignUnconfirmed(mask);
             
+            TrainTableIndex tp = trainPointer[0];
+            Vector#(SupSizeX2, TrainTableIndex) tps = replicate(tp);
+            for(Integer i = 0; i < valueOf(SupSizeX2); i = i +1) begin
+              tps[i] = tp;
+              if(unpack(mask[i]))
+                  tp = nextTrainPointer(tp);
+            end
+            
             function TageSpecInfo form (Integer j);
-                return TageSpecInfo{ooIndex: indices[j], confirmed: True};
+                return TageSpecInfo{ooIndex: indices[j], confirmed: True, trainPointer: tps[j]};
             endfunction
             Vector#(SupSizeX2, TageSpecInfo) ret = genWith(form);
             return ret;
@@ -798,6 +851,11 @@ module mkTage(Tage#(numTables)) provisos(
 
         method Action updateSpec(Bit#(TAdd#(TLog#(SupSizeX2),1)) i);
             ooBuff.specUpdate(i);
+            TrainTableIndex tp = trainPointer[0];
+            for(Integer j = 0; fromInteger(j) < i; j=j+1) begin
+               tp = nextTrainPointer(tp);
+            end
+            trainPointer[0] <= tp;
         endmethod
 
         /*
