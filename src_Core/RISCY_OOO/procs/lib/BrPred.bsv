@@ -76,16 +76,17 @@ typedef struct {
 typedef struct {
   Addr pc;
   FastPredictResult#(fastTrainInfoT) fastTrainInfo;
+  specInfoT specInfo;
   Epoch main_epoch;
   Bool decode_epoch;
-} PredIn#(type fastTrainInfoT) deriving(Bits, Eq, FShow);
+} PredIn#(type fastTrainInfoT, type specInfoT) deriving(Bits, Eq, FShow);
 
 interface DirPred#(type trainInfoT);
   method ActionValue#(Maybe#(DirPredResult#(trainInfoT))) pred;
 endinterface
 
 interface DirPredictor#(type trainInfoT, type specInfoT, type fastTrainInfoT); //Exposed types
-    method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(fastTrainInfoT))) next);
+    method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(fastTrainInfoT, specInfoT))) next);
     method Action specRecover(specInfoT specInfo, Bool taken, Bool nonBranch);
     //interface Vector#(SupSize, DirPred#(trainInfoT, specInfoT)) pred;
     method Action update(Bool taken, trainInfoT train, Bool mispred);

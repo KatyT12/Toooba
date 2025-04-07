@@ -146,10 +146,12 @@ typedef struct {
     PredictionTableInfo#(numTables) predInfo;
     Addr pc; // Only for debugging
     Bool alt_use;
+    TrainTableIndex trainIndex;
 } Pred2ToPred3#(numeric type numTables) deriving(Bits, Eq, FShow);
 
 typedef struct {
     GuardedResult#(Tuple2#(TageTrainInfo#(numTables), Addr)) res;
+    TrainTableIndex trainIndex;
 } Pred1ToPred2Data#(numeric type numTables) deriving(Bits, Eq, FShow);
 
 typedef GuardedResult#(Pred2ToPred3#(numTables)) Pred2ToPred3Data#(numeric type numTables);
@@ -212,7 +214,6 @@ module mkTage(Tage#(numTables)) provisos(
     // Either use EHRs or many rules
     Vector#(TrainTableSize, Ehr#(2,TageTrainInfo#(numTables))) trainTable <- replicateM(mkEhr(unpack(0))); // Parametrize, overkill?
     Ehr#(2, TrainTableIndex) trainPointer <- mkEhr(0);
-    Ehr#(TAdd#(SupSize,1), TrainTableIndex) trainPointerPred <- mkEhr(0);
     Vector#(SupSize, RWire#(Tuple2#(TrainTableIndex, TageTrainInfo#(numTables)))) trainResults <- replicateM(mkRWire);
 
     Ehr#(TAdd#(1, SupSize), SupCnt) numPred <- mkEhr(0);
@@ -222,7 +223,7 @@ module mkTage(Tage#(numTables)) provisos(
     LFSR#(Bit#(4)) lfsr <- mkLFSR_4;
     Reg#(Bool) starting <- mkReg(True);
 
-    Vector#(SupSize, RWire#(PredIn#(TageFastTrainInfo))) predIn <- replicateM(mkRWire);
+    Vector#(SupSize, RWire#(PredIn#(TageFastTrainInfo, TageSpecInfo))) predIn <- replicateM(mkRWire);
     // Could be DREGs
     Vector#(SupSize, Reg#(Maybe#(Pred1ToPred2Data#(numTables)))) pred1ToPred2 <- replicateM(mkDReg(tagged Invalid));
     Vector#(SupSize, Reg#(Maybe#(Pred2ToPred3Data#(numTables)))) pred2ToPred3 <- replicateM(mkDReg(tagged Invalid));
@@ -457,10 +458,6 @@ module mkTage(Tage#(numTables)) provisos(
                     `CASE_ALL_TABLES(tab, (*/ t.updateHistory(results, num); /*))
                 end
             end
-            for(Integer j = 0; j < valueOf(SupSize); j = j +1) begin
-                if(trainResults[j].wget matches tagged Valid {.index, .train})
-                    trainTable[index][j] <= train;
-            end
       //  end
     endrule
 
@@ -479,11 +476,9 @@ module mkTage(Tage#(numTables)) provisos(
         
         if(specUpdate.nonBranch) begin
             trainPointer[1] <= specUpdate.specInfo.trainPointer;
-            trainPointerPred[valueOf(SupSize)] <= specUpdate.specInfo.trainPointer;
         end
         else begin
             trainPointer[1] <= nextTrainPointer(specUpdate.specInfo.trainPointer);
-            trainPointerPred[valueOf(SupSize)] <= nextTrainPointer(specUpdate.specInfo.trainPointer);
         end
         
         if(!(specUpdate.nonBranch && numBits == 0)) begin
@@ -497,7 +492,7 @@ module mkTage(Tage#(numTables)) provisos(
                 global.updateRecoveredHistory(pack(specUpdate.taken));
 
             `ifdef DEBUG_TAGETEST   
-                $display("TAGETEST Recovery by %d Misprediction on %d, cycle %d %d\n", numBits, specUpdate.specInfo.ooIndex, cur_cycle, specUpdate.nonBranch);
+                $display("TAGETEST Recovery by %d Misprediction on %d, cycle %d %d, trainPointer: %d\n", numBits, specUpdate.specInfo.ooIndex, cur_cycle, specUpdate.nonBranch, specUpdate.specInfo.trainPointer);
             `endif
             for (Integer i = 0; i < valueOf(numTables); i = i +1) begin
                 let tab = taggedTablesVector[i];
@@ -505,7 +500,7 @@ module mkTage(Tage#(numTables)) provisos(
                 t.recoverHistory(recoverNumber); 
                 if(!specUpdate.nonBranch)
                     t.updateRecovered(pack(specUpdate.taken)); /*))
-            end 
+            end
         end
     endrule
 
@@ -526,6 +521,10 @@ module mkTage(Tage#(numTables)) provisos(
             bypassedCount[valueof(SupSize)] <= 0;
             enqMask[valueOf(SupSize)] <= 0;
             currentPred[valueOf(SupSize)] <= 0;
+            for(Integer j = 0; j < valueOf(SupSize); j = j +1) begin
+                if(trainResults[j].wget matches tagged Valid {.index, .train})
+                    trainTable[index][j] <= train;
+            end
         end
     endrule
 
@@ -568,7 +567,8 @@ module mkTage(Tage#(numTables)) provisos(
                     result: tuple2(ret, in.pc), //Passing of the PC is all for debugging
                     main_epoch: in.main_epoch,
                     decode_epoch: in.decode_epoch
-                }
+                },
+                trainIndex: in.specInfo.trainPointer
             };
         endrule
     end
@@ -597,7 +597,8 @@ module mkTage(Tage#(numTables)) provisos(
                     train: ret,
                     predInfo: predInfo,
                     pc: pc,
-                    alt_use: useAlt
+                    alt_use: useAlt,
+                    trainIndex: in.trainIndex
                 },
                 main_epoch: in.res.main_epoch,
                 decode_epoch: in.res.decode_epoch
@@ -665,16 +666,18 @@ module mkTage(Tage#(numTables)) provisos(
             end
 
             `ifdef DEBUG_TAGETEST   
-                $display("TAGETEST Prediction on: %x,%d, Taken: %d, cycle %d\n", ret.pc , i, ret.taken, cur_cycle);
+                $display("TAGETEST Prediction3 on: %x,%d, Taken: %d, cycle %d\n", ret.pc , i, ret.taken, cur_cycle);
             `endif
 
-            trainPointerPred[i] <= nextTrainPointer(trainPointerPred[i]);
-            trainResults[i].wset(tuple2(trainPointerPred[i], ret));
+            trainResults[i].wset(tuple2(result.trainIndex, ret));
+            `ifdef DEBUG_TAGETEST
+            $display("TAGETEST_PREDICT3 on %d, %d\n", ret.pc, result.trainIndex);
+            `endif
 
             let res =  GuardedResult{
                 result: DirPredResult{
                     taken: ret.taken,
-                    train: TageTrain{index: trainPointerPred[i], confirmed: True, pc: result.pc},
+                    train: TageTrain{index: result.trainIndex, confirmed: True, pc: result.pc},
                     pc: result.pc
                 },
                 main_epoch: in.main_epoch,
@@ -784,19 +787,23 @@ module mkTage(Tage#(numTables)) provisos(
                 (* split *)
                 if(mispred) (* nosplit *) begin
                     // Retrieve allocation information for next update.
-                    `ifdef DEBUG_TAGETEST
-                    $display("TAGETEST Misprediction on %x, Actual: %d, Predicted:%d, cycle %d\n", train.pc, cur_cycle, taken, train.taken);
-                    `endif
+                    
+
                     let trainInfo = trainTable[train.index][0];
+                    `ifdef DEBUG_TAGETEST
+                    $display("TAGETEST Misprediction on %x, Actual: %d, cycle %d\n", train.pc, cur_cycle, taken);
+                    $display("TAGETEST_UPDATE on %d %d, %d\n", train.pc, trainInfo.pc, train.index);
+                    `endif
                     doAssert(trainInfo.pc == train.pc, "Failed");
                     allocate(trainInfo, taken);
                     updateWithTrain(taken, trainInfo, mispred);
                 end
                 else (* nosplit *) begin
+                    let trainInfo = trainTable[train.index][0];
                     `ifdef DEBUG_TAGETEST
                     $display("TAGETEST correct prediction on %x, cycle %d\n", train.pc, cur_cycle);
+                    $display("TAGETEST_UPDATE on %d %d, %d\n", train.pc, trainInfo.pc, train.index);
                     `endif
-                    let trainInfo = trainTable[train.index][0];
                     doAssert(trainInfo.pc == train.pc, "Failed");
                     updateWithTrain(taken, trainInfo, mispred);
                 end
@@ -863,7 +870,7 @@ module mkTage(Tage#(numTables)) provisos(
             return decrementConflict;
         endmethod*/
     
-        method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(TageFastTrainInfo))) next);
+        method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(TageFastTrainInfo, TageSpecInfo))) next);
             for(Integer i = 0; i < valueOf(SupSize); i = i + 1) begin
             if (next[i] matches tagged Valid .n)
                 predIn[i].wset(n);

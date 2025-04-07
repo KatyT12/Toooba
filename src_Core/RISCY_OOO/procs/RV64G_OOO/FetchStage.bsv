@@ -489,18 +489,22 @@ module mkFetchStage(FetchStage);
         Vector#(SupSizeX2, Maybe#(DirPredIn)) branches = replicate(tagged Invalid);
         Bit#(TAdd#(TLog#(SupSizeX2),1)) count = 0;
         Bit#(SupSizeX2) mask = 0;
-        
+
         // How to do this efficiently??? !
+        
         for(Integer i = 0; i < valueOf(SupSizeX2) && fromInteger(i) <= posLastSupX2; i = i + 1) begin
-            if (tpl_2(pred_future_pc[i])) begin
-                branches[count] = tagged Valid DirPredIn{pc: pc + fromInteger(2*i), fastTrainInfo: fastPredictions[i],  main_epoch: f_main_epoch, decode_epoch: decode_epoch[0]};
-                count = count + 1;
-                mask[i] = 1;
-            end
+            mask[i] = pack(tpl_2(pred_future_pc[i]));
         end
 
         Vector#(SupSizeX2, DirPredSpecInfo) recoverInfo = dirPred.getSpec(mask);
-        
+
+        for(Integer i = 0; i < valueOf(SupSizeX2) && fromInteger(i) <= posLastSupX2; i = i + 1) begin
+            if (tpl_2(pred_future_pc[i])) begin
+                branches[count] = tagged Valid DirPredIn{pc: pc + fromInteger(2*i), fastTrainInfo: fastPredictions[i],  specInfo: recoverInfo[i], main_epoch: f_main_epoch, decode_epoch: decode_epoch[0]};
+                count = count + 1;                
+            end
+        end
+
         `ifdef DEBUG_TAGETEST
         $display("FETCH1 %x, Cycle: %d last inst: %d branch count: %d", pc, cur_cycle, posLastSupX2, count);
         `endif
@@ -648,7 +652,6 @@ module mkFetchStage(FetchStage);
             predInput.deqS[i].deq;
        end
    endrule
-
 
    function Bool isCurrentOrEmptyPred(Integer i); 
         if(dirPred.clearIfc[i].canDeq) begin

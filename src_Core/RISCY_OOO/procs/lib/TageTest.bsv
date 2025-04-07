@@ -64,7 +64,7 @@ module mkTageTest(DirPredictor#(TageTestTrainInfo, TageSpecInfo, TageTestFastTra
         tage.dirPredInterface.confirmPred(results, count);
     endmethod*/
 
-    method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(TageFastTrainInfo))) next);
+    method Action nextPc(Vector#(SupSize,Maybe#(PredIn#(TageFastTrainInfo, TageSpecInfo))) next);
         tage.dirPredInterface.nextPc(next);
     endmethod
 
