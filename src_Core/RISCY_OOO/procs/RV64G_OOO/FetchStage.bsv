@@ -78,7 +78,7 @@ interface FetchStage;
 
     // redirection methods
     method Action setWaitRedirect;
-    method Action redirect(Addr pc);
+    method Action redirect(Addr pc, Maybe#(Bool) redirect_type);
 `ifdef INCLUDE_GDB_CONTROL
    method Action setWaitFlush;
 `endif
@@ -87,6 +87,9 @@ interface FetchStage;
         Addr pc, Addr next_pc, IType iType, Bool taken,
         DirPredTrainInfo dpTrain, Bool mispred, Bool isCompressed
     );
+    method Action train_nap(Addr pc, Addr next_pc, Bool isCompressed);
+
+    method Action recover_spec(DirPredSpecInfo dpSpec, Bool taken);
 
     // security
     method Bool emptyForFlush;
@@ -98,9 +101,9 @@ interface FetchStage;
 
     // performance
     interface Perf#(DecStagePerfType) perf;
-`ifdef PERFORMANCE_MONITORING
-    method Bool redirect_evt;
-`endif
+    `ifdef PERFORMANCE_MONITORING
+        method FetchEvents events;
+    `endif
 endinterface
 
 // PC "compression" types to facilitate storing common upper PC bits in a
@@ -193,6 +196,7 @@ typedef struct {
   Addr ppc;
   Epoch main_epoch;
   DirPredTrainInfo dpTrain;
+  DirPredSpecInfo dpSpec;
   Instruction inst;
   DecodedInst dInst;
   Bit #(32) orig_inst;    // original 16b or 32b instruction ([1:0] will distinguish 16b or 32b)
@@ -338,6 +342,8 @@ module mkFetchStage(FetchStage);
 `endif
 `ifdef PERFORMANCE_MONITORING
     Reg#(Bool) redirect_evt_reg <- mkDReg(False);
+    Reg#(Bool) jump_mispredict_evt_reg <- mkDReg(False);
+    Reg#(Bool) branch_mispredict_evt_reg <- mkDReg(False);
 `endif
 
     rule updatePcInBtb;
@@ -566,12 +572,6 @@ module mkFetchStage(FetchStage);
          let decode_result = decode(validValue(decodeIn[i]).inst); // Decode 32b inst, or 32b expansion of 16b inst
          let dInst = decode_result.dInst;
          let regs = decode_result.regs;
-         DirPredResult#(DirPredTrainInfo) dir_pred = DirPredResult{taken: False, train: ?};
-         if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
-            dir_pred <- dirPred.pred[i].pred;
-            likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
-         end
-         Maybe#(Addr) dir_ppc = decodeBrPred(pc, decode_result.dInst, dir_pred.taken, (validValue(decodeIn[i]).inst_kind == Inst_32b));
          if (decodeIn[i] matches tagged Valid .in)  begin
             let cause = in.cause;
             pcBlocks.rPort[i].remove(in.pc.idx);
@@ -588,7 +588,13 @@ module mkFetchStage(FetchStage);
                decode_epoch_local = !decode_epoch_local;
                redirectPc = Valid (pc); // record redirect to the first PC in this bundle.
                trainNAP = Valid (TrainNAP {pc: pc, nextPc: pc + 2});
-            end else if (in.decode_epoch == decode_epoch_local) begin
+            end else if (in.decode_epoch == decode_epoch_local) begin   
+               DirPredResult#(DirPredTrainInfo, DirPredSpecInfo) dir_pred = DirPredResult{taken: False, train: ?, spec: ?};
+               if(decode_result.dInst.iType == Br && !likely_epoch_change) begin
+                dir_pred <- dirPred.pred[i].pred;
+                likely_epoch_change = (dir_pred.taken != validValue(decodeIn[i]).pred_jump);
+               end
+               Maybe#(Addr) dir_ppc = decodeBrPred(pc, decode_result.dInst, dir_pred.taken, (validValue(decodeIn[i]).inst_kind == Inst_32b));
                doAssert(in.main_epoch == f_main_epoch, "main epoch must match");
 
                let decode_result = decode(in.inst);    // Decode 32b inst, or 32b expansion of 16b inst
@@ -647,7 +653,7 @@ module mkFetchStage(FetchStage);
                      end
                   end
                   if(verbose) begin
-                     $display("Branch prediction: ", fshow(dInst.iType), " ; ", fshow(pc), " ; ",
+                     $display("Cycle: %0d, Branch prediction: ",cur_cycle, fshow(dInst.iType), " ; ", fshow(pc), " ; ",
                               fshow(ppc), " ; ", fshow(dir_pred.taken), " ; ", fshow(nextPc));
                   end
 
@@ -677,6 +683,7 @@ module mkFetchStage(FetchStage);
                                         ppc: ppc,
                                         main_epoch: in.main_epoch,
                                         dpTrain: dir_pred.train,
+                                        dpSpec: dir_pred.spec,
                                         inst: in.inst,
                                         dInst: dInst,
                                         orig_inst: in.orig_inst,
@@ -770,7 +777,7 @@ module mkFetchStage(FetchStage);
     method Action setWaitRedirect;
         waitForRedirect[0] <= True;
     endmethod
-    method Action redirect(Addr new_pc);
+    method Action redirect(Addr new_pc, Maybe#(Bool) redirect_type);
         if (verbose) $display("Redirect: newpc %h, old f_main_epoch %d, new f_main_epoch %d",new_pc,f_main_epoch,f_main_epoch+1);
         pc_reg[pc_redirect_port] <= new_pc;
         f_main_epoch <= (f_main_epoch == fromInteger(valueOf(NumEpochs)-1)) ? 0 : f_main_epoch + 1;
@@ -779,9 +786,14 @@ module mkFetchStage(FetchStage);
         // this redirect may be caused by a trap/system inst in commit stage
         // we conservatively set wait for flush TODO make this an input parameter
         waitForFlush[2] <= True;
-`ifdef PERFORMANCE_MONITORING
-        redirect_evt_reg <= True;
-`endif
+        `ifdef PERFORMANCE_MONITORING
+        if(redirect_type matches tagged Valid .jump) begin
+            if(jump)    
+                jump_mispredict_evt_reg <= True;
+            else
+                branch_mispredict_evt_reg <= True;
+        end
+        `endif
     endmethod
 
 `ifdef INCLUDE_GDB_CONTROL
@@ -801,6 +813,10 @@ module mkFetchStage(FetchStage);
         // It's fine for the effect of this method to be overwritten, because it fires very often
     endmethod
 
+    method Action recover_spec(DirPredSpecInfo dpSpec, Bool taken);
+        dirPred.specRecover(dpSpec, taken);
+    endmethod
+
     method Action train_predictors(
         Addr pc, Addr next_pc, IType iType, Bool taken,
         DirPredTrainInfo dpTrain, Bool mispred, Bool isCompressed
@@ -814,11 +830,11 @@ module mkFetchStage(FetchStage);
             // Train the direction predictor for all branches
             dirPred.update(taken, dpTrain, mispred);
         end
-        // train next addr pred when mispred
-        if(mispred) begin
-            let last_x16_pc = pc + (isCompressed ? 0 : 2);
-            napTrainByExe.wset(TrainNAP {pc: last_x16_pc, nextPc: next_pc});
-        end
+    endmethod
+
+    method Action train_nap(Addr pc, Addr next_pc, Bool isCompressed);
+        let last_x16_pc = pc + (isCompressed ? 0 : 2);
+        napTrainByExe.wset(TrainNAP {pc: last_x16_pc, nextPc: next_pc});
     endmethod
 
     // security
@@ -879,6 +895,6 @@ module mkFetchStage(FetchStage);
     endinterface
 
 `ifdef PERFORMANCE_MONITORING
-    method Bool redirect_evt = redirect_evt_reg._read;
+    method FetchEvents events = FetchEvents{evt_REDIRECT: redirect_evt_reg, evt_JUMP_REDIRECT: jump_mispredict_evt_reg, evt_BRANCH_REDIRECT: branch_mispredict_evt_reg};
 `endif
 endmodule

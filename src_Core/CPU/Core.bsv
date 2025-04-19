@@ -63,6 +63,7 @@ import ReorderBuffer::*;
 import ReorderBufferSynth::*;
 import Scoreboard::*;
 import ScoreboardSynth::*;
+import SpecFifo::*;
 import SpecTagManager::*;
 import Fpu::*;
 import MulDiv::*;
@@ -84,6 +85,7 @@ import MMIOCore::*;
 import RenameStage::*;
 import CommitStage::*;
 import Bypass::*;
+import DirPredictor::*;
 
 import CsrFile :: *;
 
@@ -305,11 +307,19 @@ module mkCore#(CoreId coreId)(Core);
         for(Integer i = 0; i < valueof(FpuMulDivExeNum); i = i+1) begin
             fpuMulDivSpecUpdate[i] = fix.fpuMulDivExeIfc[i].specUpdate;
         end
+
+        Vector#(AluExeNum, SpecFifo#(TDiv#(`NUM_SPEC_TAGS,2), FetchTrainBP, 1, 1)) trainBPQ <- replicateM(mkSpecFifoUG(True));
+        Vector#(AluExeNum, FIFO#(FetchTrainNAP)) trainNAP <- replicateM(mkFIFO);
+        Vector#(AluExeNum, SpeculationUpdate) btqSpecUpdate;
+        for(Integer i = 0; i < valueof(AluExeNum); i = i+1) begin
+            btqSpecUpdate[i] = trainBPQ[i].specUpdate;
+        end
+        
         GlobalSpecUpdate#(CorrectSpecPortNum, ConflictWrongSpecPortNum) globalSpecUpdate <- mkGlobalSpecUpdate(
             joinSpeculationUpdate(
-                append(append(vec(regRenamingTable.specUpdate,
+                append(append(append(vec(regRenamingTable.specUpdate,
                                   specTagManager.specUpdate,
-                                  fix.memExeIfc.specUpdate), aluSpecUpdate), fpuMulDivSpecUpdate)
+                                  fix.memExeIfc.specUpdate), aluSpecUpdate), fpuMulDivSpecUpdate), btqSpecUpdate)
             ),
             rob.specUpdate
         );
@@ -339,7 +349,7 @@ module mkCore#(CoreId coreId)(Core);
         endaction
         endfunction
 
-        Vector#(AluExeNum, FIFO#(FetchTrainBP)) trainBPQ <- replicateM(mkFIFO);
+     
         Vector#(AluExeNum, AluExePipeline) aluExe;
         for(Integer i = 0; i < valueof(AluExeNum); i = i+1) begin
             Vector#(2, SendBypass) sendBypassIfc; // exe and finish
@@ -367,17 +377,21 @@ module mkCore#(CoreId coreId)(Core);
                 method rob_getPredPC = rob.getOrigPredPC[i].get;
                 method rob_getOrig_Inst = rob.getOrig_Inst[i].get;
                 method rob_setExecuted = rob.setExecuted_doFinishAlu[i].set;
-                method fetch_train_predictors = toPut(trainBPQ[i]).put;
+                method fetch_train_predictors = trainBPQ[i].enq;
+                method fetch_train_nap = toPut(trainNAP[i]).put;
+                method Action fetch_recover_spec(DirPredSpecInfo specInfo, Bool taken); 
+                    fetchStage.recover_spec(specInfo, taken);
+                endmethod
                 method setRegReadyAggr = writeAggr(aluWrAggrPort(i));
                 interface sendBypass = sendBypassIfc;
                 method writeRegFile = writeCons(aluWrConsPort(i));
-                method Action redirect(Addr new_pc, SpecTag spec_tag, InstTag inst_tag, SpecBits spec_bits);
+                method Action redirect(Addr new_pc, SpecTag spec_tag, InstTag inst_tag, SpecBits spec_bits, Bool jump);
                     if (verbose) begin
                         $display("[ALU redirect - %d] ", i, fshow(new_pc),
                                  "; ", fshow(spec_tag), "; ", fshow(inst_tag));
                     end
                     epochManager.incrementEpoch;
-                    fetchStage.redirect(new_pc);
+                    fetchStage.redirect(new_pc, tagged Valid jump);
                     globalSpecUpdate.incorrectSpec(False, spec_tag, inst_tag, spec_bits);
                 endmethod
                 method Bool pauseExecute = globalSpecUpdate.pendingIncorrectSpec;
@@ -385,12 +399,23 @@ module mkCore#(CoreId coreId)(Core);
                 method doStats = doStatsReg._read;
             endinterface);
             aluExe[i] <- mkAluExePipeline(aluExeInput);
+            
+            Bool train_ready = (trainBPQ[i].first.spec_bits == 0);
+
             // truly call fetch method to train branch predictor
-            rule doFetchTrainBP;
-                let train <- toGet(trainBPQ[i]).get;
+            rule doFetchTrainBP(trainBPQ[i].notEmpty && train_ready);
+                let train = trainBPQ[i].first.data;
+                trainBPQ[i].deq;
                 fetchStage.train_predictors(
                     train.pc, train.nextPc, train.iType, train.taken,
                     train.dpTrain, train.mispred, train.isCompressed
+                );
+            endrule
+
+            rule doFetchTrainNAP;
+                let train <- toGet(trainNAP[i]).get;
+                fetchStage.train_nap(
+                    train.pc, train.nextPc, train.isCompressed
                 );
             endrule
         end
@@ -619,7 +644,9 @@ module mkCore#(CoreId coreId)(Core);
         method setReconcileI = reconcile_i._write(True);
         method setReconcileD = reconcile_d._write(True);
         method killAll = coreFix.killAll;
-        method redirectPc = fetchStage.redirect;
+        method Action redirectPc(Addr new_pc);
+            fetchStage.redirect(new_pc, tagged Invalid);
+        endmethod
         method setFetchWaitRedirect = fetchStage.setWaitRedirect;
 `ifdef INCLUDE_GDB_CONTROL
         method setFetchWaitFlush    = fetchStage.setWaitFlush;
@@ -1058,7 +1085,10 @@ module mkCore#(CoreId coreId)(Core);
      Reg#(EventsCache) events_llc_reg <- mkRegU;
      rule report_events;
          EventsCore events = unpack(pack(commitStage.events));
-         events.evt_REDIRECT = zeroExtend(pack(fetchStage.redirect_evt));
+         FetchEvents fe = fetchStage.events;
+         events.evt_REDIRECT = zeroExtend(pack(fe.evt_REDIRECT));
+         events.evt_JUMP_REDIRECT = zeroExtend(pack(fe.evt_JUMP_REDIRECT));
+         events.evt_BRANCH_REDIRECT = zeroExtend(pack(fe.evt_BRANCH_REDIRECT));
          hpm_core_events[1] <= events;
      endrule
 
@@ -1329,7 +1359,7 @@ module mkCore#(CoreId coreId)(Core);
       l2Tlb.updateVMInfo(vmI, vmD);
 
       let startpc = csrf.dpc_read;
-      fetchStage.redirect (startpc);
+      fetchStage.redirect (startpc, tagged Invalid);
       renameStage.debug_resume;
       commitStage.debug_resume;
 
