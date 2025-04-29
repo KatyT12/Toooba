@@ -379,9 +379,9 @@ module mkCore#(CoreId coreId)(Core);
                 method rob_setExecuted = rob.setExecuted_doFinishAlu[i].set;
                 method fetch_train_predictors = trainBPQ[i].enq;
                 method fetch_train_nap = toPut(trainNAP[i]).put;
-                method Action fetch_recover_spec(DirPredSpecInfo specInfo, Bool taken); 
-                    fetchStage.recover_spec(specInfo, taken);
-                endmethod
+                //method Action fetch_recover_spec(DirPredSpecInfo specInfo, Bool taken); 
+                //    fetchStage.recover_spec(specInfo, taken);
+                //endmethod
                 method setRegReadyAggr = writeAggr(aluWrAggrPort(i));
                 interface sendBypass = sendBypassIfc;
                 method writeRegFile = writeCons(aluWrConsPort(i));
@@ -408,7 +408,7 @@ module mkCore#(CoreId coreId)(Core);
                 trainBPQ[i].deq;
                 fetchStage.train_predictors(
                     train.pc, train.nextPc, train.iType, train.taken,
-                    train.dpTrain, train.mispred, train.isCompressed
+                    train.dpTrain, train.dpSpec, train.mispred, train.isCompressed
                 );
             endrule
 

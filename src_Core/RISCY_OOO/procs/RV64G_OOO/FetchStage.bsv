@@ -85,11 +85,11 @@ interface FetchStage;
     method Action done_flushing();
     method Action train_predictors(
         Addr pc, Addr next_pc, IType iType, Bool taken,
-        DirPredTrainInfo dpTrain, Bool mispred, Bool isCompressed
+        DirPredTrainInfo dpTrain, DirPredSpecInfo dp_spec, Bool mispred, Bool isCompressed
     );
     method Action train_nap(Addr pc, Addr next_pc, Bool isCompressed);
 
-    method Action recover_spec(DirPredSpecInfo dpSpec, Bool taken);
+    //method Action recover_spec(DirPredSpecInfo dpSpec, Bool taken);
 
     // security
     method Bool emptyForFlush;
@@ -813,13 +813,13 @@ module mkFetchStage(FetchStage);
         // It's fine for the effect of this method to be overwritten, because it fires very often
     endmethod
 
-    method Action recover_spec(DirPredSpecInfo dpSpec, Bool taken);
-        dirPred.specRecover(dpSpec, taken);
-    endmethod
+//    method Action recover_spec(DirPredSpecInfo dpSpec, Bool taken);
+//        dirPred.specRecover(dpSpec, taken);
+//    endmethod
 
     method Action train_predictors(
         Addr pc, Addr next_pc, IType iType, Bool taken,
-        DirPredTrainInfo dpTrain, Bool mispred, Bool isCompressed
+        DirPredTrainInfo dpTrain, DirPredSpecInfo dpSpec, Bool mispred, Bool isCompressed
     );
         //if (iType == J || (iType == Br && next_pc < pc)) begin
         //    // Only train the next address predictor for jumps and backward branches
@@ -828,6 +828,9 @@ module mkFetchStage(FetchStage);
         //end
         if (iType == Br) begin
             // Train the direction predictor for all branches
+            if(mispred) begin
+                dirPred.specRecover(dpSpec, taken);
+            end
             dirPred.update(taken, dpTrain, mispred);
         end
     endmethod

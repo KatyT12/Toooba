@@ -128,6 +128,7 @@ typedef struct {
     IType iType;
     Bool taken;
     DirPredTrainInfo dpTrain;
+    DirPredSpecInfo dpSpec;
     Bool mispred;
     Bool isCompressed;
 } FetchTrainBP deriving(Bits, Eq, FShow);
@@ -154,7 +155,7 @@ interface AluExeInput;
     // Fetch stage
     method Action fetch_train_predictors(ToSpecFifo#(FetchTrainBP) train);
     method Action fetch_train_nap(FetchTrainNAP train);
-    method Action fetch_recover_spec(DirPredSpecInfo specInfo, Bool taken);
+    //method Action fetch_recover_spec(DirPredSpecInfo specInfo, Bool taken);
 
     // global broadcast methods
     // set aggressive sb & wake up inst in RS
@@ -359,10 +360,6 @@ module mkAluExePipeline#(AluExeInput inIfc)(AluExePipeline);
             // must be a branch, train branch predictor
             doAssert(x.iType == Jr || x.iType == Br, "only jr and br can mispredict");
 
-            if(x.iType == Br) begin
-                inIfc.fetch_recover_spec(x.dpSpec, x.controlFlow.taken);
-            end
-
             inIfc.fetch_train_nap(FetchTrainNAP {
                 pc: x.controlFlow.pc,
                 nextPc: x.controlFlow.nextPc,
@@ -376,6 +373,7 @@ module mkAluExePipeline#(AluExeInput inIfc)(AluExePipeline);
                     iType: x.iType,
                     taken: x.controlFlow.taken,
                     dpTrain: x.dpTrain,
+                    dpSpec: x.dpSpec,
                     mispred: True,
                     isCompressed: x.isCompressed
                 },
@@ -410,6 +408,7 @@ module mkAluExePipeline#(AluExeInput inIfc)(AluExePipeline);
                         iType: x.iType,
                         taken: x.controlFlow.taken,
                         dpTrain: x.dpTrain,
+                        dpSpec: x.dpSpec,
                         mispred: False,
                         isCompressed: x.isCompressed
                     },
