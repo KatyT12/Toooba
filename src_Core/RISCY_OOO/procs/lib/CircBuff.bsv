@@ -27,6 +27,7 @@ module mkCircBuff(CircBuff#(size, t)) provisos(Bits#(t, a__));
     Vector#(size, Ehr#(TAdd#(SupSize,2),Maybe#(t))) buff <- replicateM(mkEhr(tagged Invalid));
     
     Reg#(CircBuffIndex#(size)) startSpec <- mkConfigReg(0);
+    RWire#(CircBuffIndex#(size)) endSpecRecover <- mkRWire;
     
     // For now - allow for multiple predictions in a cycle
     Ehr#(TAdd#(SupSize,2), CircBuffIndex#(size)) endSpec <- mkEhr(0);
@@ -38,7 +39,12 @@ module mkCircBuff(CircBuff#(size, t)) provisos(Bits#(t, a__));
 
     (* no_implicit_conditions, fire_when_enabled*)
     rule updateEndSpecLast;
-        endSpecLast <= endSpec[valueOf(SupSize)+1];
+        if(endSpecRecover.wget matches tagged Valid .r) begin
+            endSpecLast <= r;
+        end
+        else begin
+            endSpecLast <= endSpec[valueOf(SupSize)+1];
+        end
     endrule
 
     // Methods should not conflict as the indices for update and predict theoretically should not overlap
@@ -70,7 +76,8 @@ module mkCircBuff(CircBuff#(size, t)) provisos(Bits#(t, a__));
 
     // Index should always be == argument of enqueue, but I seperate the methods here
     method ActionValue#(Bit#(TLog#(size))) handleMispred(CircBuffIndex#(size) index);
-        endSpec[valueOf(SupSize)] <= nextIndex(index);
+        //endSpec[valueOf(SupSize)] <= nextIndex(index);
+        endSpecRecover.wset(nextIndex(index));
         /*
             In the predictor it already stops predictions from updating the history in the case of a misprediction in the same cycle
             So recovery isn't needed for these bits.
