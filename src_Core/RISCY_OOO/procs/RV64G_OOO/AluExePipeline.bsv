@@ -197,6 +197,8 @@ module mkAluExePipeline#(AluExeInput inIfc)(AluExePipeline);
     Integer exeSendBypassPort = 0;
     Integer finishSendBypassPort = 1;
 
+    Reg#(UInt#(64)) branchRedirectCount <- mkReg(0);
+
 `ifdef PERF_COUNT
     // performance counters
     Count#(Data) exeRedirectBrCnt <- mkCount(0);
@@ -345,6 +347,12 @@ module mkAluExePipeline#(AluExeInput inIfc)(AluExePipeline);
         // handle spec tags for branch predictions
         (* split *)
         if (x.controlFlow.mispredict) (* nosplit *) begin
+            
+            if(x.iType == Br) begin
+                branchRedirectCount <= branchRedirectCount + 1;
+                $display("TageSingleCycle, redirectCount = %d, Cycle: %d\n", branchRedirectCount, cur_cycle);
+            end
+        
             // wrong branch predictin, we must have spec tag
             doAssert(isValid(x.spec_tag), "mispredicted branch must have spec tag");
             inIfc.redirect(x.controlFlow.nextPc, validValue(x.spec_tag), x.tag, exeToFin.spec_bits, x.iType == Jr);

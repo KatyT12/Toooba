@@ -588,15 +588,14 @@ module mkTage(Tage#(numTables)) provisos(
             
             // Recover histories first, then update bit
             let recoverNumber = numBits;
-            global.recoverFrom[recoverNumber].undo;
-            global.updateRecoveredHistory(pack(taken));
+            let g_recovered <- global.recoverFrom[recoverNumber].undo(pack(taken));
 
             `ifdef DEBUG_TAGETEST   
                 //$display("TAGETEST Misprediction on %x, cycle %d\n", train.tageInfo.pc, cur_cycle);
             `endif
             for (Integer i = 0; i < valueOf(numTables); i = i +1) begin
                 let tab = taggedTablesVector[i];
-                `CASE_ALL_TABLES(tab, (*/ t.recoverHistory(recoverNumber); t.updateRecovered(pack(taken)); /*))
+                `CASE_ALL_TABLES(tab, (*/ t.recoverHistory(recoverNumber, pack(taken), g_recovered); /*))
             end 
         endmethod
     

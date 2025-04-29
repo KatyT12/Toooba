@@ -59,8 +59,7 @@ interface TaggedTable#(numeric type indexSize, numeric type tagSize, numeric typ
     method Tuple2#(Bit#(tagSize), Bit#(indexSize)) trainingInfo(Addr pc, HistoryRetrieve recovered); // To be used in training
 
     method Action updateHistory(Bit#(SupSize) results, SupCnt count);
-    method Action updateRecovered(Bit#(1) taken);
-    method Action recoverHistory(Bit#(TLog#(MaxSpecSize)) numRecovery);
+    method Action recoverHistory(Bit#(TLog#(MaxSpecSize)) numRecovery, Bit#(1) taken, Bit#(GlobalHistoryLength) global_hist);
     
 
     method Action updateEntry(Bit#(`MAX_INDEX_SIZE) index, Bit#(`MAX_TAGGED) tag, Bool taken, UsefulCtrUpdate usefulUpdate);
@@ -103,7 +102,7 @@ module mkTaggedTable#(GlobalBranchHistory#(GlobalHistoryLength) global) (TaggedT
     function Tuple2#(Bit#(tagSize), Bit#(indexSize)) getHistory(HistoryRetrieve hr, Addr pc, Maybe#(Bit#(TLog#(SupSize))) count);
         Bit#(TAdd#(tagSize, indexSize)) hist = 0;
         if(hr == AFTER_RECOVERY)
-            hist = folded.recoveredHistory;
+            hist = folded.history;
         else if(hr == BEFORE_RECOVERY)
             if(count matches tagged Valid .num)
                 hist = folded.sameWindowHistory[num].history;
@@ -170,10 +169,9 @@ module mkTaggedTable#(GlobalBranchHistory#(GlobalHistoryLength) global) (TaggedT
 
 
     method Action updateHistory(Bit#(SupSize) results, SupCnt count) = folded.updateHistory(results, count);
-    method Action updateRecovered(Bit#(1) taken) = folded.updateRecoveredHistory(taken);
-    method Action recoverHistory(Bit#(TLog#(MaxSpecSize)) numRecovery);
+    method Action recoverHistory(Bit#(TLog#(MaxSpecSize)) numRecovery, Bit#(1) taken, Bit#(GlobalHistoryLength) global_hist);
         sameCycleRecovery.send;
-        folded.recoverFrom[numRecovery].undo;
+        folded.recoverFrom[numRecovery].undo(taken, global_hist);
     endmethod
 
   

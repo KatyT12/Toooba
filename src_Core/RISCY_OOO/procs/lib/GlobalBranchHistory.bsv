@@ -1,14 +1,18 @@
 // Simple global history
 // No speculative recovery or anything
+import Assert::*;
 import BrPred::*;
 import BranchParams::*;
 import Vector::*;
 import ConfigReg::*;
 import Ehr::*;
 import ProcTypes::*;
+import Types::*;
+
+
 
 interface RecoverMechanism#(numeric type length);
-    method Action undo;
+    method ActionValue#(Bit#(length)) undo(Bit#(1) taken);
     `ifdef DEBUG
     method ActionValue#(Bit#(length)) debugUndo;
     `endif
@@ -18,7 +22,6 @@ interface GlobalBranchHistory#(numeric type length);
     method Bit#(length) history;
     method Bit#(length) recoveredHistory;
     method Action addHistoryBits(Bit#(SupSize) taken, SupCnt count);
-    method Action updateRecoveredHistory(Bit#(1) taken);
     interface Vector#(MaxSpecSize, RecoverMechanism#(length)) recoverFrom;
     `ifdef DEBUG
     method Action debugInitialise(Bit#(length) newHistory);
@@ -26,44 +29,68 @@ interface GlobalBranchHistory#(numeric type length);
 endinterface
 
 module mkGlobalBranchHistory(GlobalBranchHistory#(length));
-    Ehr#(2, Bit#(length)) shift_register <- mkEhr(0);
-    Ehr#(2, Bit#(MaxSpecSize)) last_removed_history <- mkEhr(0);
+    Reg#(Bit#(length)) shift_register <- mkReg(0);
+    Reg#(Bit#(MaxSpecSize)) last_removed_history <- mkReg(0);
     
-    PulseWire recover <- mkPulseWire;
     RWire#(Tuple2#(Bit#(SupSize), SupCnt)) updateHistoryData <- mkRWire;
     RWire#(Bit#(1)) updateRecoveredHistoryData <- mkRWire;
+
+    RWire#(Bit#(length)) recovered_history <- mkRWire;
+    RWire#(Bit#(length)) recovered_updated_history <- mkRWire;
+    RWire#(Bit#(length)) updated_history <- mkRWire;
+
+    RWire#(Bit#(MaxSpecSize)) updated_recover_info <- mkRWire;
+    RWire#(Bit#(MaxSpecSize)) updated_recovered_recover_info <- mkRWire;
 
     Vector#(MaxSpecSize, RecoverMechanism#(length)) recoverIfc;
 
     (* no_implicit_conditions, fire_when_enabled *)
-    rule updateHist(updateHistoryData.wget matches tagged Valid {.results, .count} &&& !recover);
-        shift_register[1] <= truncateLSB({shift_register[1], reverseBits(results)} << count);
-        Bit#(SupSize) bits = shift_register[1][valueOf(length)-1: valueOf(length)-valueOf(SupSize)];
-        last_removed_history[1] <= truncateLSB({last_removed_history[1], bits} << count);
+    rule updateHist(updateHistoryData.wget matches tagged Valid {.results, .count});
+        //shift_register[1] <= truncateLSB({shift_register[1], reverseBits(results)} << count);
+        updated_history.wset(truncateLSB({shift_register, reverseBits(results)} << count));
+        Bit#(SupSize) bits = shift_register[valueOf(length)-1: valueOf(length)-valueOf(SupSize)];
+        updated_recover_info.wset(truncateLSB({last_removed_history, bits} << count));
     endrule
 
     (* no_implicit_conditions, fire_when_enabled *)
-    rule updateHistRecovered(updateRecoveredHistoryData.wget matches tagged Valid .taken &&& recover);
-        shift_register[1] <= truncateLSB({shift_register[1], taken} << 1);
-        last_removed_history[1] <= truncateLSB({last_removed_history[1], shift_register[1][valueOf(length)-1]} << 1);
+    rule updateAll;
+        if(recovered_updated_history.wget matches tagged Valid .hist) begin
+            if(updated_recovered_recover_info.wget matches tagged Valid .removed) begin
+                shift_register <= hist;
+                last_removed_history <= removed;
+            end else begin
+                doAssert(False, "Updated recovered history inconsistency\n");
+            end
+        end
+        else if (updated_history.wget matches tagged Valid .hist) begin
+            if(updated_recover_info.wget matches tagged Valid .removed) begin
+                shift_register <= hist;
+                last_removed_history <= removed;
+            end else begin
+                doAssert(False, "Updated history inconsistency\n");
+            end
+        end
     endrule
 
-    function ActionValue#(Bit#(length)) undoHistory(Bit#(TLog#(MaxSpecSize)) i);
+    function ActionValue#(Bit#(length)) undoHistory(Bit#(TLog#(MaxSpecSize)) i, Bit#(1) taken);
         actionvalue
-            recover.send;
             UInt#(TLog#(MaxSpecSize)) j = unpack(i);
-            Bit#(length) recovered = (last_removed_history[0][j:0] << (valueOf(length)-1)) >> i | truncateLSB(shift_register[0] >> (i+1));
-            shift_register[0] <= recovered;
+            Bit#(length) recovered = (last_removed_history[j:0] << (valueOf(length)-1)) >> i | truncateLSB(shift_register >> (i+1));
+            let use_hist = recovered;
+            let removed = last_removed_history >> (i+1);
 
-            last_removed_history[0] <= last_removed_history[0] >> (i+1);
+            recovered_history.wset(recovered);
+            recovered_updated_history.wset(truncateLSB({use_hist, taken} << 1));
+            updated_recovered_recover_info.wset(truncateLSB({removed, use_hist[valueOf(length)-1]} << 1));
             return recovered;
         endactionvalue
     endfunction
 
     for(Integer i = 0; i < valueOf(MaxSpecSize); i = i+1) begin
         recoverIfc[i] = (interface RecoverMechanism#(length);
-            method Action undo;
-                let a <- undoHistory(fromInteger(i));
+            method ActionValue#(Bit#(length)) undo(Bit#(1) taken);
+                let a <- undoHistory(fromInteger(i), taken);
+                return a;
             endmethod
 
             `ifdef DEBUG
@@ -81,13 +108,11 @@ module mkGlobalBranchHistory(GlobalBranchHistory#(length));
         //update.send;
     endmethod
 
-    method Action updateRecoveredHistory(Bit#(1) taken);
-        updateRecoveredHistoryData.wset(taken);
-        //update.send;
-    endmethod
 
-    method Bit#(length) history = shift_register[0];
-    method Bit#(length) recoveredHistory  = shift_register[1];
+    method Bit#(length) history = shift_register;
+    method Bit#(length) recoveredHistory;
+        return shift_register; // !!!
+    endmethod
 
     `ifdef DEBUG
     method Action debugInitialise(Bit#(length) newHistory);
