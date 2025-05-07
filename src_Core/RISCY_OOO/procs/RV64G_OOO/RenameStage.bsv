@@ -332,6 +332,7 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
         let ppc = x.ppc;
         let main_epoch = x.main_epoch;
         let dpTrain = x.dpTrain;
+        let dpSpec = x.dpSpec;
         let inst = x.inst;
         let dInst = x.dInst;
         let arch_regs = x.regs;
@@ -371,7 +372,8 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
                                 lsqAtCommitNotified: False,
                                 nonMMIOStDone: False,
                                 epochIncremented: True, // we have incremented epoch
-                                spec_bits: specTagManager.currentSpecBits
+                                spec_bits: specTagManager.currentSpecBits,
+                                spec_info: dpSpec
                                };
         rob.enqPort[0].enq(y);
         // record if we issue an interrupt
@@ -457,6 +459,7 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
         let ppc = x.ppc;
         let main_epoch = x.main_epoch;
         let dpTrain = x.dpTrain;
+        let dpSpec = x.dpSpec;
         let inst = x.inst;
         let dInst = x.dInst;
         let arch_regs = x.regs;
@@ -510,7 +513,7 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
         // send to ALU reservation station
         if (to_exec) begin
             reservationStationAlu[0].enq(ToReservationStation {
-                data: AluRSData {dInst: dInst, dpTrain: dpTrain},
+                data: AluRSData {dInst: dInst, dpTrain: dpTrain, dpSpec: dpSpec},
                 regs: phy_regs,
                 tag: inst_tag,
                 spec_bits: spec_bits,
@@ -563,7 +566,8 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
                                 lsqAtCommitNotified: False,
                                 nonMMIOStDone: False,
                                 epochIncremented: True, // system inst has incremented epoch
-                                spec_bits: spec_bits
+                                spec_bits: spec_bits,
+                                spec_info: dpSpec
                                };
         rob.enqPort[0].enq(y);
 
@@ -624,6 +628,7 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
         let ppc = x.ppc;
         let main_epoch = x.main_epoch;
         let dpTrain = x.dpTrain;
+        let dpSpec = x.dpSpec;
         let inst = x.inst;
         let dInst = x.dInst;
         let arch_regs = x.regs;
@@ -733,7 +738,8 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
                                 lsqAtCommitNotified: False,
                                 nonMMIOStDone: False,
                                 epochIncremented: False,
-                                spec_bits: spec_bits
+                                spec_bits: spec_bits,
+                                spec_info: x.dpSpec
                                };
         rob.enqPort[0].enq(y);
 
@@ -836,6 +842,7 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
                 let ppc = x.ppc;
                 let main_epoch = x.main_epoch;
                 let dpTrain = x.dpTrain;
+                let dpSpec = x.dpSpec;
                 let inst = x.inst;
                 let dInst = x.dInst;
                 let arch_regs = x.regs;
@@ -944,7 +951,7 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
                             // can process, send to ALU rs
                             aluExeUsed[k] = True; // mark resource used
                             reservationStationAlu[k].enq(ToReservationStation {
-                                data: AluRSData {dInst: dInst, dpTrain: dpTrain},
+                                data: AluRSData {dInst: dInst, dpTrain: dpTrain, dpSpec: dpSpec},
                                 regs: phy_regs,
                                 tag: inst_tag,
                                 spec_bits: spec_bits,
@@ -1085,7 +1092,8 @@ module mkRenameStage#(RenameInput inIfc)(RenameStage);
                                                 lsqAtCommitNotified: False,
                                                 nonMMIOStDone: False,
                                                 epochIncremented: False,
-                                                spec_bits: spec_bits
+                                                spec_bits: spec_bits,
+                                                spec_info: dpSpec
                                                };
                         rob.enqPort[i].enq(y);
 

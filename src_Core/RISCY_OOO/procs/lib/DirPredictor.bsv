@@ -26,15 +26,26 @@
 import Assert::*;
 import Types::*;
 import ProcTypes::*;
+import Fifos::*;
 import Vector::*;
 import BrPred::*;
+
+/*
 import Bht::*;
 import GSelectPred::*;
+import Bimodal::*;
 import GSharePred::*;
 import TourPred::*;
+
 import TourPredSecure::*;
+import TourPredStaged::*; FOR NOW
+*/
+import TageTest::*;
 
 export DirPredTrainInfo(..);
+export DirPredSpecInfo(..);
+export DirPredFastTrainInfo(..);
+export DirPredIn;
 export mkDirPredictor;
 
 `ifdef DIR_PRED_BHT
@@ -48,10 +59,24 @@ typedef GShareTrainInfo DirPredTrainInfo;
 `endif
 `ifdef DIR_PRED_TOUR
 typedef TourTrainInfo DirPredTrainInfo;
+typedef TourPredSpecInfo DirPredSpecInfo;
+`endif
+`ifdef DIR_PRED_TOUR_STAGED
+typedef TourTrainInfo DirPredTrainInfo;
+typedef TourPredSpecInfo DirPredSpecInfo;
+`endif
+`ifdef DIR_PRED_BIMODAL
+typedef BimodalTrainInfo DirPredTrainInfo;
+`endif
+`ifdef DIR_PRED_TAGETEST
+typedef TageTestTrainInfo DirPredTrainInfo;
+typedef TageTestSpecInfo DirPredSpecInfo;
+typedef TageTestFastTrainInfo DirPredFastTrainInfo;
 `endif
 
+typedef PredIn#(DirPredFastTrainInfo) DirPredIn;
 (* synthesize *)
-module mkDirPredictor(DirPredictor#(DirPredTrainInfo));
+module mkDirPredictor(DirPredictor#(DirPredTrainInfo, DirPredSpecInfo, DirPredFastTrainInfo));
 `ifdef DIR_PRED_BHT
 `ifdef SECURITY
     staticAssert(False, "BHT with flush methods is not implemented");
@@ -79,6 +104,17 @@ module mkDirPredictor(DirPredictor#(DirPredTrainInfo));
 `else
     let m <- mkTourPred;
 `endif
+`endif
+
+`ifdef DIR_PRED_BIMODAL
+    let m <- mkBimodal;
+`endif
+`ifdef DIR_PRED_TAGETEST
+    let m <- mkTageTest;
+`endif
+
+`ifdef DIR_PRED_TOUR_STAGED
+    let m <- mkTourPredStaged;
 `endif
 
     return m;
